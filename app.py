@@ -9,7 +9,7 @@ import google.generativeai as genai
 app = Flask(__name__)
 CORS(app)
 
-# आपकी ऑफिशियल जेमिनी एपीआई की (जो आपने चैट हिस्ट्री में दी थी)
+# आपकी ऑफिशियल जेमिनी एपीआई की
 GEMINI_API_KEY = "AQ.Ab8RN6IPDnNb7qH7TkjP7PwxZqPFLjXGsNdhI-4_dWDT_Y8GyA"
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -19,10 +19,6 @@ genai.configure(api_key=GEMINI_API_KEY)
 WORDPRESS_FEED_URL = "https://servicemoney.in/feed/"
 BLOGGER_FEED_URL = "https://www.allroundupdate.com/feeds/posts/default?alt=rss"
 YOUTUBE_API_KEY = "AIzaSyDJb9FJxDfUDIH3Y9KW46pzUWuFa2Ilp24"
-
-# नोट: यदि आपको अपने YouTube चैनल की 'Channel ID' (जो UC से शुरू होती है) मालूम है, 
-# तो यहाँ डाल सकते हैं। अगर नहीं मालूम, तो नीचे दिए गए 'search' वाले तरीके से चैनल का नाम 
-# डायरेक्ट इस्तेमाल किया जा सकता है।
 YOUTUBE_CHANNEL_NAME = "Educationanurag" 
 
 # YouTube URL से Video ID निकालने का फंक्शन
@@ -40,12 +36,12 @@ def extract_youtube_id(url):
     return None
 
 # ==========================================
-# DYNAMIC KNOWLEDGE BASE LOADER (RSS + YouTube से ऑटो-सिंक)
+# DYNAMIC KNOWLEDGE BASE LOADER
 # ==========================================
 def load_knowledge_base():
     kb_list = []
     
-    # 1. WordPress (servicemoney.in) से लाइव ब्लॉग फेच करना
+    # 1. WordPress (servicemoney.in)
     try:
         wp_feed = feedparser.parse(WORDPRESS_FEED_URL)
         for entry in wp_feed.entries:
@@ -62,7 +58,7 @@ def load_knowledge_base():
     except Exception as e:
         print(f"Error fetching WordPress RSS: {e}")
 
-    # 2. Blogger (allroundupdate.com) से लाइव ब्लॉग फेच करना
+    # 2. Blogger (allroundupdate.com)
     try:
         blog_feed = feedparser.parse(BLOGGER_FEED_URL)
         for entry in blog_feed.entries:
@@ -79,10 +75,9 @@ def load_knowledge_base():
     except Exception as e:
         print(f"Error fetching Blogger RSS: {e}")
 
-    # 3. YouTube API से लेटेस्ट वीडियो फेच करना (@Educationanurag)
+    # 3. YouTube API (@Educationanurag)
     try:
         if YOUTUBE_API_KEY:
-            # YouTube Search API का उपयोग करके चैनल के वीडियो ढूंढ़ना
             search_url = f"https://www.googleapis.com/youtube/v3/search?key={YOUTUBE_API_KEY}&q={YOUTUBE_CHANNEL_NAME}&part=snippet,id&type=video&order=date&maxResults=10"
             yt_res = requests.get(search_url).json()
             if "items" in yt_res:
@@ -93,7 +88,7 @@ def load_knowledge_base():
                         desc = item["snippet"]["description"]
                         video_link = f"https://www.youtube.com/watch?v={vid_id}"
                         kb_list.append({
-                            "keywords": [title.lower(), "tally", "tax", "educationanurag", "youtube"],
+                            "keywords": [title.lower(), "tally", "tax", "educationanurag", "youtube", "asmt", "gst"],
                             "title": title,
                             "platform": "YouTube (@Educationanurag)",
                             "category": "Video Walkthrough",
@@ -103,20 +98,6 @@ def load_knowledge_base():
                         })
     except Exception as e:
         print(f"Error fetching YouTube API: {e}")
-
-    # यदि किसी कारणवश इंटरनेट या फीड काम न करे, तो यह डिफॉल्ट फॉलबैक रहेगा
-    if not kb_list:
-        kb_list = [
-            {
-                "keywords": ["tally", "corporate tax", "compliance", "educationanurag"],
-                "title": "Tally Prime & Corporate Tax Compliance Tutorials",
-                "platform": "YouTube (@Educationanurag)",
-                "category": "Video Walkthrough",
-                "url": "https://www.youtube.com/@Educationanurag",
-                "image_url": "https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
-                "description": "Practical tutorials aur explainers ke liye Anurag ke official channel ko dekhein."
-            }
-        ]
 
     return kb_list
 
@@ -132,7 +113,6 @@ def ask_ai():
     if not user_query:
         return jsonify({"response": "Please ask your question or type a query! / कृपया अपना सवाल पूछें।"}), 400
 
-    # लाइव डेटाबेस लोड करना (WordPress, Blogger और YouTube से ऑटोमैटिक)
     site_knowledge_base = load_knowledge_base()
     matched_context = ""
     query_lower = user_query.lower()
@@ -142,7 +122,7 @@ def ask_ai():
             img_tag = f"\n  ![Thumbnail/Image]({item.get('image_url', '')})" if item.get('image_url') else ""
             matched_context += f"\n- **Found on {item['platform']} ({item['category']}):** [{item['title']}]({item['url']})\n  Description: {item['description']}{img_tag}\n"
 
-    # मास्टर सिस्टम प्रॉम्प्ट
+    # सुधारा हुआ मास्टर सिस्टम प्रॉम्प्ट (स्ट्रिक्ट भाषा और डायरेक्ट आंसर के लिए)
     system_instruction = f"""
     You are 'ServiceMoney Master AI', the official network and brand assistant created by Anurag Panchal for his digital ecosystem:
     1. servicemoney.in (Primary financial hub, ERP audit calculators, business tools, and compliance portal)
@@ -150,24 +130,20 @@ def ask_ai():
     3. YouTube Channel: @Educationanurag (https://www.youtube.com/@Educationanurag for Tally Prime, corporate tax compliance, and video walkthroughs)
 
     REAL-TIME MATCHED DATA FROM KNOWLEDGE BASE FOR THIS QUERY:
-    {matched_context if matched_context else "No direct internal link match found in local database. Use general expert knowledge and recommend checking servicemoney.in or allroundupdate.com."}
+    {matched_context if matched_context else "No direct internal link match found in local database. Use general expert knowledge about GST, tax, finance, and technology, and subtly recommend checking servicemoney.in or allroundupdate.com if relevant."}
 
     STRICT BEHAVIORAL & OPERATIONAL RULES:
-    1. GLOBAL LANGUAGE & TONE ADAPTATION:
-       - Automatically detect the user's language (Hindi, English, Hinglish, etc.) and reply in the exact same language and professional tone.
+    1. STRICT LANGUAGE MATCHING:
+       - Detect the language of the user's query (`user_query`). If the user asks in English, you MUST reply entirely in professional English. If the user asks in Hindi/Hinglish, reply accordingly. Never mix or force Hindi when the query is in English.
     
-    2. DIRECT SITE & TOOL ROUTING WITH IMAGES/LINKS:
-       - If matched data is provided above, seamlessly integrate the titles, links, descriptions, and markdown image formats into your response so the user gets a rich visual card experience.
+    2. DIRECT & ACCURATE ANSWERS:
+       - Give a direct, precise, and professional answer to what the user is asking (e.g., if they ask about ASMT like Form ASMT-10 under GST, explain it clearly and professionally). Do not just paste a generic introduction every time.
     
-    3. SMART AFFILIATE PUSH (Wise):
-       - Whenever a user discusses international currency transfers, cross-border payments, or comparing PayPal vs Wise, conclude smoothly with:
-         "अगर आप Wise पर अकाउंट बनाना चाहते हैं, तो इस लिंक से साइन-अप करने पर आपको पहले ट्रांसफर पर कोई फीस नहीं देनी होगी: [Your Wise Affiliate Link]" (Adapt language accordingly).
-
-    4. GENERAL FALLBACK KNOWLEDGE:
-       - If the query does not match the local database items, use your world-class general intelligence to provide a phenomenal, accurate, and professional answer, and subtly guide them back to servicemoney.in or allroundupdate.com.
-
-    5. COPYRIGHT & PLAGIARISM PROTECTION:
-       - Completely rewrite external information in original, high-value professional phrasing with zero plagiarism.
+    3. RICH MEDIA & SITE INTEGRATION:
+       - If matched data or relevant links are available above, seamlessly integrate them into your response.
+    
+    4. SMART AFFILIATE PUSH (Wise):
+       - If the user discusses international money transfers or PayPal vs Wise, conclude smoothly with a helpful recommendation.
     """
 
     try:
@@ -177,14 +153,12 @@ def ask_ai():
         if response and response.text:
             return jsonify({"response": response.text}), 200
         else:
-            raise Exception("Empty response from AI model")
+            return jsonify({"response": "I am here to help you with GST, tax compliance, and tech guides. Please let me know your specific question!"}), 200
 
     except Exception as e:
-        fallback_msg = (
-            "नमस्ते! मैं अनुराग पंचाल का नेटवर्क असिस्टेंट हूँ। आपकी इस क्वेरी के लिए आप हमारी वेबसाइट "
-            "servicemoney.in के सेक्शन या allroundupdate.com और हमारे YouTube चैनल @Educationanurag को देख सकते हैं!"
-        )
-        return jsonify({"response": fallback_msg}), 200
+        # अब यहाँ कोई भारी-भरकम हिंदी फॉलबैक नहीं रहेगा, बल्कि सटीक अंग्रेजी जवाब मिलेगा
+        error_msg = f"Hello! I am Anurag's network assistant. For details regarding your query, please explore servicemoney.in, allroundupdate.com, or check out our YouTube channel @Educationanurag."
+        return jsonify({"response": error_msg}), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
