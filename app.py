@@ -1,136 +1,342 @@
 import os
+import time
 import re
-import feedparser
 import requests
+import feedparser
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
-CORS(app)
-
-# आपकी ऑफिशियल जेमिनी एपीआई की
-GEMINI_API_KEY = "AQ.Ab8RN6IPDnNb7qH7TkjP7PwxZqPFLjXGsNdhI-4_dWDT_Y8GyA"
-genai.configure(api_key=GEMINI_API_KEY)
+# Enable CORS for WordPress, Blogger, and web embedding
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ==========================================
-# CONFIGURATIONS (वेबसाइट्स और YouTube API)
+# 1. OFFICIAL CREDENTIALS & ENDPOINTS
 # ==========================================
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6IPDnNb7qH7Tkjp7PwxZqPFLjXGsNdhI-4_dWDT_Y8GyA")
 WORDPRESS_FEED_URL = "https://servicemoney.in/feed/"
 BLOGGER_FEED_URL = "https://www.allroundupdate.com/feeds/posts/default?alt=rss"
 YOUTUBE_API_KEY = "AIzaSyDJb9FJxDfUDIH3Y9KW46pzUWuFa2Ilp24"
 YOUTUBE_CHANNEL_NAME = "Educationanurag"
 
+# Initialize Google GenAI Client with modern SDK
+client = genai.Client(api_key=GEMINI_API_KEY)
+
 # ==========================================
-# DYNAMIC KNOWLEDGE BASE LOADER (WordPress + Blogger + YouTube)
+# 2. IN-MEMORY DYNAMIC KNOWLEDGE BASE
+# Auto-syncs new tools, categories & articles
 # ==========================================
-def load_knowledge_base():
-    kb_list = []
+CACHE_TTL_SECONDS = 900  # 15 minutes cache to keep response lightning fast
+cached_knowledge_items = []
+last_cache_update = 0
+
+def fetch_dynamic_ecosystem(force_refresh=False):
+    """
+    Dynamically loads all current and FUTURE tools, pages, and blogs
+    from servicemoney.in, allroundupdate.com, and YouTube.
+    Any new tool or article added to the sites will automatically be picked up here.
+    """
+    global cached_knowledge_items, last_cache_update
+    now = time.time()
     
-    # 1. WordPress (ServiceMoney.in)
+    if not force_refresh and cached_knowledge_items and (now - last_cache_update < CACHE_TTL_SECONDS):
+        return cached_knowledge_items
+
+    items = [
+        # Built-in Core Pages & Tools
+        {
+            "id": "audit-calculator-tool",
+            "title": "Audit Calculator Tool (ERP & Compliance)",
+            "platform": "ServiceMoney.in",
+            "category": "ERP Category",
+            "url": "https://servicemoney.in/category/erp/",
+            "description": "Financial audit calculator to compute GST liability, annual revenue/turnover, tax reconciliations, and accounting arithmetic.",
+            "keywords": ["audit", "calculator", "audit tool", "erp", "gst calculator", "annual revenue", "turnover", "calculation", "multiplication", "math", "hisab", "clautiom", "clautate"]
+        },
+        {
+            "id": "gst-rule-37a-86b",
+            "title": "GST Rule 37A & 86B: Stop Losing 15% of Your Company Valuation to Regulatory Debt",
+            "platform": "AllRoundUpdate.com",
+            "category": "Finance Category (2nd Pagination / Page 2)",
+            "url": "https://www.allroundupdate.com/search/label/Finance",
+            "description": "Critical guide on GST Rule 37A (ITC reversal) and Rule 86B (1% cash tax payment limit) preventing company valuation decay.",
+            "keywords": ["gst rule 37a", "rule 86b", "company valuation", "regulatory debt", "itc reversal", "finance category", "pagination", "15% valuation"]
+        },
+        {
+            "id": "dpdp-act",
+            "title": "DPDP Act (Digital Personal Data Protection Act) Compliance Guide",
+            "platform": "AllRoundUpdate.com",
+            "category": "Technology & Legal Compliance",
+            "url": "https://www.allroundupdate.com/search?q=DPDP",
+            "description": "Complete breakdown of India's DPDP Act, data fiduciary obligations, consent managers, and corporate compliance checklists.",
+            "keywords": ["dpdp", "dpdp act", "digital personal data protection", "data privacy", "fiduciary", "consent manager"]
+        },
+        {
+            "id": "about-founder",
+            "title": "About Anurag Panchal & Official Network",
+            "platform": "ServiceMoney.in",
+            "category": "About Us",
+            "url": "https://servicemoney.in/about-us/",
+            "description": "Anurag Panchal is a financial consultant, GST expert, and tech educator founder of ServiceMoney.in, AllRoundUpdate.com, and YouTube channel @Educationanurag.",
+            "keywords": ["anurag", "anurag panchal", "founder", "creator", "owner", "author", "about us", "who are you", "social profiles"]
+        }
+    ]
+
+    # 1. Dynamically Auto-Fetch ALL Posts and Tools from ServiceMoney.in
     try:
         wp_feed = feedparser.parse(WORDPRESS_FEED_URL)
-        for entry in wp_feed.entries:
-            categories = [tag.term for tag in entry.get('tags', [])]
-            kb_list.append({
-                "keywords": [entry.title.lower()] + [c.lower() for c in categories],
-                "title": entry.title,
-                "platform": "ServiceMoney.in",
-                "url": entry.link,
-                "description": entry.get('summary', '')[:150]
-            })
+        if hasattr(wp_feed, 'entries') and wp_feed.entries:
+            for entry in wp_feed.entries[:30]:
+                tags = [t.term.lower() for t in entry.get('tags', [])]
+                title = entry.get('title', '')
+                summary = (entry.get('summary') or entry.get('description') or '')
+                # Clean html tags from summary
+                clean_summary = re.sub(r'<[^>]+>', '', summary)[:200]
+                
+                # Check if this item is a tool or calculator
+                is_tool = any(w in title.lower() or w in clean_summary.lower() for w in ['tool', 'calculator', 'generator', 'checker', 'audit', 'converter'])
+                
+                items.append({
+                    "id": f"sm-{entry.get('link')}",
+                    "title": title,
+                    "platform": "ServiceMoney.in",
+                    "category": entry.get('category', 'ERP & Tools' if is_tool else 'Finance'),
+                    "url": entry.get('link', 'https://servicemoney.in'),
+                    "description": clean_summary,
+                    "is_tool": is_tool,
+                    "keywords": [title.lower()] + tags + (["tool", "calculator"] if is_tool else []) + ["servicemoney"]
+                })
     except Exception as e:
-        print(f"Error WordPress RSS: {e}")
+        print(f"ServiceMoney feed fetch warning: {e}")
 
-    # 2. Blogger (AllRoundUpdate.com)
+    # 2. Dynamically Auto-Fetch ALL Posts and Updates from AllRoundUpdate.com
     try:
         blog_feed = feedparser.parse(BLOGGER_FEED_URL)
-        for entry in blog_feed.entries:
-            kb_list.append({
-                "keywords": [entry.title.lower()],
-                "title": entry.title,
-                "platform": "AllRoundUpdate.com",
-                "url": entry.link,
-                "description": entry.get('summary', '')[:150]
-            })
-    except Exception as e:
-        print(f"Error Blogger RSS: {e}")
+        if hasattr(blog_feed, 'entries') and blog_feed.entries:
+            for entry in blog_feed.entries[:30]:
+                tags = [t.term.lower() for t in entry.get('tags', [])]
+                title = entry.get('title', '')
+                summary = (entry.get('summary') or entry.get('description') or '')
+                clean_summary = re.sub(r'<[^>]+>', '', summary)[:200]
+                
+                is_tool = any(w in title.lower() or w in clean_summary.lower() for w in ['tool', 'calculator', 'app', 'update'])
 
-    # 3. YouTube API (@Educationanurag)
+                items.append({
+                    "id": f"aru-{entry.get('link')}",
+                    "title": title,
+                    "platform": "AllRoundUpdate.com",
+                    "category": entry.get('category', 'Technology & Finance'),
+                    "url": entry.get('link', 'https://www.allroundupdate.com'),
+                    "description": clean_summary,
+                    "is_tool": is_tool,
+                    "keywords": [title.lower()] + tags + ["allroundupdate"]
+                })
+    except Exception as e:
+        print(f"AllRoundUpdate feed fetch warning: {e}")
+
+    # 3. Dynamically Fetch Videos from YouTube (@Educationanurag)
     try:
         if YOUTUBE_API_KEY:
-            search_url = f"https://www.googleapis.com/youtube/v3/search?key={YOUTUBE_API_KEY}&q={YOUTUBE_CHANNEL_NAME}&part=snippet,id&type=video&order=date&maxResults=10"
-            yt_res = requests.get(search_url).json()
+            yt_url = f"https://www.googleapis.com/youtube/v3/search?key={YOUTUBE_API_KEY}&q=Education+Anurag+Tally+GST&part=snippet,id&type=video&order=relevance&maxResults=8"
+            yt_res = requests.get(yt_url, timeout=4).json()
             if "items" in yt_res:
-                for item in yt_res["items"]:
-                    vid_id = item["id"].get("videoId")
+                for v in yt_res["items"]:
+                    vid_id = v.get("id", {}).get("videoId")
                     if vid_id:
-                        title = item["snippet"]["title"]
-                        desc = item["snippet"]["description"]
-                        video_link = f"https://www.youtube.com/watch?v={vid_id}"
-                        kb_list.append({
-                            "keywords": [title.lower(), "tally", "tax", "educationanurag", "youtube"],
+                        title = v.get("snippet", {}).get("title", "")
+                        items.append({
+                            "id": f"yt-{vid_id}",
                             "title": title,
                             "platform": "YouTube (@Educationanurag)",
-                            "url": video_link,
-                            "description": desc[:150]
+                            "category": "Video Tutorial",
+                            "url": f"https://www.youtube.com/watch?v={vid_id}",
+                            "description": v.get("snippet", {}).get("description", "")[:150],
+                            "keywords": [title.lower(), "educationanurag", "youtube", "tally", "gst", "video"]
                         })
     except Exception as e:
-        print(f"Error YouTube API: {e}")
+        print(f"YouTube API notice: {e}")
 
-    return kb_list
+    cached_knowledge_items = items
+    last_cache_update = now
+    return cached_knowledge_items
 
+def detect_language(text):
+    """Detects query language for seamless global user communication."""
+    # Check for Devanagari script (Hindi, Marathi, etc.)
+    if re.search(r'[\u0900-\u097F]', text):
+        return "Hindi"
+    
+    # Check for common Hinglish/Hindi romanized words
+    hinglish_tokens = ["kya", "kaise", "karna", "batao", "hai", "nahi", "chahiye", "mera", "meri", "karo", "mujhe", "bataiye"]
+    text_lower = text.lower()
+    if any(re.search(rf'\b{w}\b', text_lower) for w in hinglish_tokens):
+        return "Hinglish"
+        
+    # Check German
+    if any(re.search(rf'\b{w}\b', text_lower) for w in ["wie", "was", "ist", "bitte", "danke", "nicht", "kann", "steuer"]):
+        return "German"
+        
+    # Check French
+    if any(re.search(rf'\b{w}\b', text_lower) for w in ["comment", "pourquoi", "merci", "bonjour", "est", "une"]):
+        return "French"
+        
+    # Default to English
+    return "English"
+
+# ==========================================
+# 3. PING ENDPOINT (KEEPS BOT AWAKE 24x7)
+# ==========================================
 @app.route('/ping', methods=['GET'])
+@app.route('/api/ping', methods=['GET'])
 def ping():
-    return jsonify({"status": "awake"}), 200
+    return jsonify({
+        "status": "awake",
+        "service": "ServiceMoney Master AI",
+        "timestamp": time.time()
+    }), 200
 
+# ==========================================
+# 4. CHATBOT QUERY ENDPOINT (/ask-ai)
+# ==========================================
 @app.route('/ask-ai', methods=['POST'])
+@app.route('/api/ask-ai', methods=['POST'])
 def ask_ai():
-    data = request.json
-    user_query = data.get("query", "")
-    
+    data = request.json or {}
+    user_query = data.get("query", data.get("prompt", "")).strip()
+
     if not user_query:
-        return jsonify({"response": "Please ask your question!"}), 400
+        return jsonify({"response": "Please provide your question."}), 400
 
-    # नॉलेज बेस से मैच करना
-    site_knowledge_base = load_knowledge_base()
-    matched_context = ""
+    kb = fetch_dynamic_ecosystem()
+    detected_lang = detect_language(user_query)
     query_lower = user_query.lower()
-    
-    for item in site_knowledge_base:
-        if any(kw in query_lower for kw in item["keywords"]):
-            matched_context += f"- Found on {item['platform']}: [{item['title']}]({item['url']}) - {item['description']}\n"
 
-    # एकदम स्मार्ट गूगल-जैसी जेमिनी प्रणाली
-    full_prompt = f"""
-    You are 'ServiceMoney Master AI', an advanced, highly intelligent professional assistant created by Anurag Panchal. 
-    You represent the digital ecosystem of Anurag Panchal, including servicemoney.in, allroundupdate.com, and YouTube channel @Educationanurag.
+    # Intent Detection
+    has_audit_calc_intent = any(w in query_lower for w in [
+        "audit", "calculator", "calculate", "calute", "revenue", "turnover", 
+        "multiplication", "math", "hisab", "clautiom", "clautate", "erp", "tax math"
+    ])
+    has_wise_intent = any(w in query_lower for w in [
+        "wise", "transferwise", "foreign", "payout", "international", 
+        "remittance", "us to india", "paypal", "fincen", "cross border", "wire"
+    ])
+    has_gst_37a = any(w in query_lower for w in ["37a", "86b", "regulatory debt", "valuation"])
+    has_dpdp = any(w in query_lower for w in ["dpdp", "data privacy", "fiduciary"])
+    has_about_author = any(w in query_lower for w in ["anurag", "founder", "owner", "author", "about us", "who are you"])
 
-    Here is relevant information found in our official website/YouTube databases for this query (if any):
-    {matched_context if matched_context else "No specific internal database match found."}
+    # Match User Query with ALL Existing and Future Tools/Articles
+    matched_tools = []
+    matched_articles = []
 
-    User Query: {user_query}
+    for item in kb:
+        # Check title and keyword overlap
+        score = 0
+        for kw in item.get("keywords", []):
+            if kw in query_lower or query_lower in kw:
+                score += 2
+        
+        # Word token matching
+        tokens = [t for t in re.split(r'\W+', query_lower) if len(t) > 3]
+        for token in tokens:
+            if token in item.get("title", "").lower():
+                score += 3
+            if token in item.get("description", "").lower():
+                score += 1
 
-    Instructions:
-    1. Language Match: Detect the user's language (English, Hindi, Hinglish, etc.) and reply in the exact same language professionally.
-    2. Hybrid Capability: 
-       - If relevant articles, tutorials, or YouTube videos from our platforms are provided above, use them, provide a clear explanation, and give the clickable markdown link so the user can visit or watch them.
-       - If the answer is not in our internal database, use your world-class general intelligence (like Gemini/Google) to answer the user's question completely, accurately, and professionally.
-    3. Be natural, helpful, polite, and smart like Google/Gemini. Never give a blank or repetitive error message. Always answer what the user asks.
-    """
+        if score > 0:
+            if item.get("is_tool") or "tool" in item.get("title", "").lower():
+                matched_tools.append(item)
+            else:
+                matched_articles.append(item)
+
+    # Build context string
+    context_str = ""
+    for item in (matched_tools + matched_articles)[:6]:
+        context_str += f"- [{item['platform']}] Title: {item['title']} | Category: {item.get('category', 'General')} | URL: {item['url']} | Summary: {item['description']}\n"
+
+    # Multilingual System Prompt
+    system_instruction = f"""You are 'ServiceMoney Master AI', an elite, helpful assistant representing Anurag Panchal's official network:
+1. servicemoney.in (Flagship: Financial audit tools, GST compliance, FinCEN, banking, ERP tools)
+2. allroundupdate.com (Sister Portal: Technology news, DPDP Act, GST Rule 37A & 86B valuation guide, business updates)
+3. YouTube (@Educationanurag): Practical video tutorials for Tally Prime, GST, and automation.
+4. Founder: Anurag Panchal
+
+CRITICAL RULES:
+1. LANGUAGE CONSISTENCY: The detected user language is '{detected_lang}'. Formulate your entire answer in '{detected_lang}'. If user wrote in German, reply in German. If in Hindi, reply in Hindi. If English, reply in English.
+2. DYNAMIC TOOL & BLOG SUGGESTION (CURRENT & FUTURE):
+   - Whenever a user asks for a calculation, audit, math, or problem solving, ALWAYS check the matching tools from ServiceMoney.in.
+   - For calculations/turnover/GST audits, specifically guide them to the 'Audit Calculator Tool' in the 'ERP Category' on ServiceMoney.in (https://servicemoney.in/category/erp/).
+   - If ANY new tool or article is present in the context below that solves their problem, proactively recommend it with its category and direct URL.
+3. CROSS-WEBSITE GUIDANCE:
+   - For 'DPDP Act' or 'GST Rule 37A & 86B: Stop Losing 15% Valuation', inform the user that this article is on sister site AllRoundUpdate.com (Finance Category, Page 2) with URL https://www.allroundupdate.com/search/label/Finance.
+4. AFFILIATE RECOMMENDATION (WISE):
+   - If the query is about international money transfer, foreign remittance, B2B payouts, PayPal alternatives, or Wise:
+   - Include a courteous invitation in the USER'S LANGUAGE offering fee-free first transfer via https://wise.com:
+     * In Hindi: "💡 **कमाई व बचत का मौका**: अगर आप अंतरराष्ट्रीय ट्रांसफर या B2B payouts के लिए Wise पर अकाउंट बनाना चाहते हैं, तो इस पार्टनर लिंक से साइन-अप करने पर आपको पहले ट्रांसफर पर कोई फीस नहीं देनी होगी: https://wise.com"
+     * In English: "💡 **Special Offer**: If you need to open an account for international payouts, using our partner link grants you a zero-fee first transfer: https://wise.com"
+     * For other languages, translate this concept smoothly into that language.
+5. YOUTUBE TUTORIALS:
+   - When appropriate for Tally Prime, practical GST filing, or accounting automation, recommend @Educationanurag (https://www.youtube.com/@Educationanurag).
+6. 100% COPYRIGHT-FREE & COMPREHENSIVE:
+   - Even if the exact topic is not covered on our websites, provide a thorough, accurate, and original explanation.
+   - Never copy external copyrighted text verbatim."""
+
+    prompt = f"""User Query: "{user_query}"
+Detected Language: {detected_lang}
+
+Live Dynamic Knowledge Context:
+{context_str if context_str else "No direct internal post match. Answer using high-level expert intelligence while guiding the user to relevant ecosystem categories."}
+
+Tool Suggestion Needed: {"YES (Highlight Audit Calculator Tool in ERP on ServiceMoney.in)" if has_audit_calc_intent else "NO"}
+Wise Affiliate Offer Needed: {"YES (Append fee-free Wise invitation in user's language)" if has_wise_intent else "NO"}
+GST 37A / Valuation Intent: {"YES (Guide to AllRoundUpdate Finance Category Page 2)" if has_gst_37a else "NO"}
+
+Respond in {detected_lang}."""
 
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(full_prompt)
-        
+        # Use gemini-2.5-flash: high speed, reliable, zero deprecation issues
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction
+            )
+        )
         if response and response.text:
-            return jsonify({"response": response.text}), 200
+            return jsonify({
+                "response": response.text,
+                "answer": response.text,
+                "language": detected_lang,
+                "status": "success"
+            }), 200
         else:
-            return jsonify({"response": "I am here to help you with anything you need. Please ask your question!"}), 200
+            return jsonify({"response": "I am ready to help you with ServiceMoney tools, GST, and tech updates."}), 200
 
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"response": "Hello! I am Anurag's AI assistant. You can ask me anything about finance, GST rules, technology, or general topics!"}), 200
+        print(f"Gemini API Exception: {e}")
+        # Multilingual intelligent fallback
+        if detected_lang in ["Hindi", "Hinglish"]:
+            if has_audit_calc_intent:
+                fallback = "नमस्ते! आपके कैलकुलेशन या ऑडिट संबंधी सवाल के लिए **ServiceMoney.in** पर **Audit Calculator Tool** उपलब्ध है। आप **ERP & Compliance** केटेगरी में जाकर डायरेक्ट GST व रेवेन्यू कैलकुलेट कर सकते हैं: https://servicemoney.in/category/erp/"
+            elif has_wise_intent:
+                fallback = "नमस्ते! अंतरराष्ट्रीय ट्रांसफर या B2B payouts के लिए आप **Wise** का उपयोग कर सकते हैं। पार्टनर लिंक से पहले ट्रांसफर पर ज़ीरो फीस का लाभ उठाएं: https://wise.com"
+            else:
+                fallback = "नमस्ते! आपके सवाल के समाधान के लिए आप **ServiceMoney.in** के ERP टूल्स और **AllRoundUpdate.com** के फाइनेंस आर्टिकल्स देख सकते हैं। वीडियो ट्यूटोरियल्स के लिए हमारे यूट्यूब चैनल **@Educationanurag** (https://www.youtube.com/@Educationanurag) पर विजिट करें।"
+        else:
+            if has_audit_calc_intent:
+                fallback = "Hello! For your calculation or audit requirements, **ServiceMoney.in** provides an **Audit Calculator Tool** in the **ERP & Compliance** category: https://servicemoney.in/category/erp/"
+            elif has_wise_intent:
+                fallback = "Hello! For international transfers or business payouts, you can use **Wise**. Get zero fees on your first transfer using our official partner link: https://wise.com"
+            else:
+                fallback = "Hello! You can explore dedicated compliance tools on **ServiceMoney.in** and in-depth tech updates on **AllRoundUpdate.com**. For video tutorials, visit our YouTube channel **@Educationanurag** (https://www.youtube.com/@Educationanurag)."
+
+        return jsonify({
+            "response": fallback,
+            "answer": fallback,
+            "error_debug": str(e)
+        }), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
