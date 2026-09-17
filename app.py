@@ -1,342 +1,1288 @@
+Neeche standalone `app.py` diya hai. Yeh current Replit bot ka Flask equivalent hai aur isme:
+
+- Flask server
+- WordPress/Blogger CORS
+- Gemini API via `os.environ.get("GEMINI_API_KEY")`
+- Configurable `GEMINI_MODEL`
+- Multilingual prompt
+- ServiceMoney RSS
+- AllRoundUpdate RSS
+- Sitemap se future articles/tools discovery
+- Educationanurag YouTube discovery
+- Relevant article/tool/video matching
+- Wise affiliate suggestion
+- 5-minute knowledge cache
+- Timeout, 429, 502, 503, 504 error handling
+- `/api/assistant/chat` aur old `/ask-ai` endpoint
+
+Important: current Replit project ka live backend TypeScript me hai. Yeh code GitHub ke standalone Python Flask deployment ke liye hai.
+
+```python
+import html as html_lib
+import json
+import logging
 import os
-import time
 import re
-import requests
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from time import sleep
+from urllib.parse import urljoin, urlparse
+
 import feedparser
-from flask import Flask, request, jsonify
+import requests
+from flask import Flask, jsonify, request
 from flask_cors import CORS
-from google import genai
-from google.genai import types
+
 
 app = Flask(__name__)
-# Enable CORS for WordPress, Blogger, and web embedding
-CORS(app, resources={r"/*": {"origins": "*"}})
+app.config["JSON_SORT_KEYS"] = False
 
-# ==========================================
-# 1. OFFICIAL CREDENTIALS & ENDPOINTS
-# ==========================================
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6IPDnNb7qH7Tkjp7PwxZqPFLjXGsNdhI-4_dWDT_Y8GyA")
-WORDPRESS_FEED_URL = "https://servicemoney.in/feed/"
-BLOGGER_FEED_URL = "https://www.allroundupdate.com/feeds/posts/default?alt=rss"
-YOUTUBE_API_KEY = "AIzaSyDJb9FJxDfUDIH3Y9KW46pzUWuFa2Ilp24"
-YOUTUBE_CHANNEL_NAME = "Educationanurag"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("smart-knowledge-bot")
 
-# Initialize Google GenAI Client with modern SDK
-client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ==========================================
-# 2. IN-MEMORY DYNAMIC KNOWLEDGE BASE
-# Auto-syncs new tools, categories & articles
-# ==========================================
-CACHE_TTL_SECONDS = 900  # 15 minutes cache to keep response lightning fast
-cached_knowledge_items = []
-last_cache_update = 0
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-def fetch_dynamic_ecosystem(force_refresh=False):
-    """
-    Dynamically loads all current and FUTURE tools, pages, and blogs
-    from servicemoney.in, allroundupdate.com, and YouTube.
-    Any new tool or article added to the sites will automatically be picked up here.
-    """
-    global cached_knowledge_items, last_cache_update
-    now = time.time()
-    
-    if not force_refresh and cached_knowledge_items and (now - last_cache_update < CACHE_TTL_SECONDS):
-        return cached_knowledge_items
+SERVICE_MONEY_FEED = os.environ.get(
+    "WORDPRESS_FEED_URL",
+    "https://servicemoney.in/feed/",
+)
 
-    items = [
-        # Built-in Core Pages & Tools
-        {
-            "id": "audit-calculator-tool",
-            "title": "Audit Calculator Tool (ERP & Compliance)",
-            "platform": "ServiceMoney.in",
-            "category": "ERP Category",
-            "url": "https://servicemoney.in/category/erp/",
-            "description": "Financial audit calculator to compute GST liability, annual revenue/turnover, tax reconciliations, and accounting arithmetic.",
-            "keywords": ["audit", "calculator", "audit tool", "erp", "gst calculator", "annual revenue", "turnover", "calculation", "multiplication", "math", "hisab", "clautiom", "clautate"]
-        },
-        {
-            "id": "gst-rule-37a-86b",
-            "title": "GST Rule 37A & 86B: Stop Losing 15% of Your Company Valuation to Regulatory Debt",
-            "platform": "AllRoundUpdate.com",
-            "category": "Finance Category (2nd Pagination / Page 2)",
-            "url": "https://www.allroundupdate.com/search/label/Finance",
-            "description": "Critical guide on GST Rule 37A (ITC reversal) and Rule 86B (1% cash tax payment limit) preventing company valuation decay.",
-            "keywords": ["gst rule 37a", "rule 86b", "company valuation", "regulatory debt", "itc reversal", "finance category", "pagination", "15% valuation"]
-        },
-        {
-            "id": "dpdp-act",
-            "title": "DPDP Act (Digital Personal Data Protection Act) Compliance Guide",
-            "platform": "AllRoundUpdate.com",
-            "category": "Technology & Legal Compliance",
-            "url": "https://www.allroundupdate.com/search?q=DPDP",
-            "description": "Complete breakdown of India's DPDP Act, data fiduciary obligations, consent managers, and corporate compliance checklists.",
-            "keywords": ["dpdp", "dpdp act", "digital personal data protection", "data privacy", "fiduciary", "consent manager"]
-        },
-        {
-            "id": "about-founder",
-            "title": "About Anurag Panchal & Official Network",
-            "platform": "ServiceMoney.in",
-            "category": "About Us",
-            "url": "https://servicemoney.in/about-us/",
-            "description": "Anurag Panchal is a financial consultant, GST expert, and tech educator founder of ServiceMoney.in, AllRoundUpdate.com, and YouTube channel @Educationanurag.",
-            "keywords": ["anurag", "anurag panchal", "founder", "creator", "owner", "author", "about us", "who are you", "social profiles"]
-        }
+ALLROUNDUPDATE_FEED = os.environ.get(
+    "BLOGGER_FEED_URL",
+    "https://www.allroundupdate.com/feeds/posts/default?alt=rss&max-results=50",
+)
+
+SERVICE_MONEY_SITEMAP = os.environ.get(
+    "SERVICEMONEY_SITEMAP_URL",
+    "https://servicemoney.in/sitemap_index.xml",
+)
+
+ALLROUNDUPDATE_SITEMAP = os.environ.get(
+    "ALLROUNDUPDATE_SITEMAP_URL",
+    "https://www.allroundupdate.com/sitemap.xml",
+)
+
+YOUTUBE_CHANNEL_URL = os.environ.get(
+    "YOUTUBE_CHANNEL_URL",
+    "https://www.youtube.com/@Educationanurag/videos",
+)
+
+SERVICE_MONEY_ABOUT_URL = os.environ.get(
+    "SERVICEMONEY_ABOUT_URL",
+    "https://servicemoney.in/about-us/",
+)
+
+ALLROUNDUPDATE_FINANCE_URL = os.environ.get(
+    "ALLROUNDUPDATE_FINANCE_URL",
+    "https://www.allroundupdate.com/search/label/Finance",
+)
+
+GEMINI_MODEL = os.environ.get(
+    "GEMINI_MODEL",
+    "gemini-3.6-flash",
+)
+
+CACHE_SECONDS = 5 * 60
+
+HTTP_HEADERS = {
+    "User-Agent": (
+        "SmartKnowledgeBot/1.0 "
+        "(+https://servicemoney.in)"
+    )
+}
+
+TOOL_PATTERN = re.compile(
+    r"calculator|calculate|audit|tool|utility|checker|generator|"
+    r"formula|solve|erp",
+    re.IGNORECASE,
+)
+
+SITEMAP_DISCOVERY_PATTERN = re.compile(
+    r"tool|calculator|audit|gst|tax|finance|erp|revenue|"
+    r"compliance|accounting",
+    re.IGNORECASE,
+)
+
+TRANSIENT_HTTP_STATUSES = {429, 502, 503, 504}
+
+
+# ============================================================
+# CORS
+# ============================================================
+
+configured_origins = os.environ.get("ALLOWED_ORIGINS", "").strip()
+
+if configured_origins:
+    allowed_origins = [
+        origin.strip()
+        for origin in configured_origins.split(",")
+        if origin.strip()
+    ]
+else:
+    allowed_origins = [
+        "https://servicemoney.in",
+        "https://www.servicemoney.in",
+        "https://allroundupdate.com",
+        "https://www.allroundupdate.com",
+        "http://localhost:3000",
+        "http://localhost:5000",
     ]
 
-    # 1. Dynamically Auto-Fetch ALL Posts and Tools from ServiceMoney.in
+CORS(
+    app,
+    resources={
+        r"/*": {
+            "origins": allowed_origins,
+            "methods": ["GET", "POST", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+        }
+    },
+)
+
+
+# ============================================================
+# ERROR TYPES
+# ============================================================
+
+class TemporaryAssistantError(Exception):
+    """Temporary Gemini/network failure safe for frontend responses."""
+
+
+TEMPORARY_ASSISTANT_MESSAGE = (
+    "The assistant is taking a brief pause. "
+    "Please try asking your question again in a moment."
+)
+
+
+# ============================================================
+# BASIC HELPERS
+# ============================================================
+
+def decode_html(value):
+    if not value:
+        return ""
+
+    value = re.sub(
+        r"<!\[CDATA\[(.*?)\]\]>",
+        r"\1",
+        str(value),
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = html_lib.unescape(value)
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
+
+
+def absolute_url(value, base_url):
+    if not value:
+        return ""
+
     try:
-        wp_feed = feedparser.parse(WORDPRESS_FEED_URL)
-        if hasattr(wp_feed, 'entries') and wp_feed.entries:
-            for entry in wp_feed.entries[:30]:
-                tags = [t.term.lower() for t in entry.get('tags', [])]
-                title = entry.get('title', '')
-                summary = (entry.get('summary') or entry.get('description') or '')
-                # Clean html tags from summary
-                clean_summary = re.sub(r'<[^>]+>', '', summary)[:200]
-                
-                # Check if this item is a tool or calculator
-                is_tool = any(w in title.lower() or w in clean_summary.lower() for w in ['tool', 'calculator', 'generator', 'checker', 'audit', 'converter'])
-                
-                items.append({
-                    "id": f"sm-{entry.get('link')}",
-                    "title": title,
-                    "platform": "ServiceMoney.in",
-                    "category": entry.get('category', 'ERP & Tools' if is_tool else 'Finance'),
-                    "url": entry.get('link', 'https://servicemoney.in'),
-                    "description": clean_summary,
-                    "is_tool": is_tool,
-                    "keywords": [title.lower()] + tags + (["tool", "calculator"] if is_tool else []) + ["servicemoney"]
-                })
-    except Exception as e:
-        print(f"ServiceMoney feed fetch warning: {e}")
+        return urljoin(base_url, value)
+    except Exception:
+        return value
 
-    # 2. Dynamically Auto-Fetch ALL Posts and Updates from AllRoundUpdate.com
+
+def slug_title(url):
     try:
-        blog_feed = feedparser.parse(BLOGGER_FEED_URL)
-        if hasattr(blog_feed, 'entries') and blog_feed.entries:
-            for entry in blog_feed.entries[:30]:
-                tags = [t.term.lower() for t in entry.get('tags', [])]
-                title = entry.get('title', '')
-                summary = (entry.get('summary') or entry.get('description') or '')
-                clean_summary = re.sub(r'<[^>]+>', '', summary)[:200]
-                
-                is_tool = any(w in title.lower() or w in clean_summary.lower() for w in ['tool', 'calculator', 'app', 'update'])
+        path_parts = [
+            part for part in urlparse(url).path.split("/")
+            if part
+        ]
 
-                items.append({
-                    "id": f"aru-{entry.get('link')}",
-                    "title": title,
-                    "platform": "AllRoundUpdate.com",
-                    "category": entry.get('category', 'Technology & Finance'),
-                    "url": entry.get('link', 'https://www.allroundupdate.com'),
-                    "description": clean_summary,
-                    "is_tool": is_tool,
-                    "keywords": [title.lower()] + tags + ["allroundupdate"]
-                })
-    except Exception as e:
-        print(f"AllRoundUpdate feed fetch warning: {e}")
+        if not path_parts:
+            return url
 
-    # 3. Dynamically Fetch Videos from YouTube (@Educationanurag)
+        slug = path_parts[-1]
+        slug = re.sub(r"[-_]+", " ", slug)
+        return slug.title()
+    except Exception:
+        return url
+
+
+def fetch_text(url, timeout=8):
+    """
+    Returns an empty string when a source is unavailable.
+    A single failed feed will not crash the complete knowledge loader.
+    """
     try:
-        if YOUTUBE_API_KEY:
-            yt_url = f"https://www.googleapis.com/youtube/v3/search?key={YOUTUBE_API_KEY}&q=Education+Anurag+Tally+GST&part=snippet,id&type=video&order=relevance&maxResults=8"
-            yt_res = requests.get(yt_url, timeout=4).json()
-            if "items" in yt_res:
-                for v in yt_res["items"]:
-                    vid_id = v.get("id", {}).get("videoId")
-                    if vid_id:
-                        title = v.get("snippet", {}).get("title", "")
-                        items.append({
-                            "id": f"yt-{vid_id}",
-                            "title": title,
-                            "platform": "YouTube (@Educationanurag)",
-                            "category": "Video Tutorial",
-                            "url": f"https://www.youtube.com/watch?v={vid_id}",
-                            "description": v.get("snippet", {}).get("description", "")[:150],
-                            "keywords": [title.lower(), "educationanurag", "youtube", "tally", "gst", "video"]
-                        })
-    except Exception as e:
-        print(f"YouTube API notice: {e}")
+        response = requests.get(
+            url,
+            headers=HTTP_HEADERS,
+            timeout=timeout,
+        )
 
-    cached_knowledge_items = items
-    last_cache_update = now
-    return cached_knowledge_items
+        if not response.ok:
+            logger.warning(
+                "Knowledge source returned HTTP %s: %s",
+                response.status_code,
+                url,
+            )
+            return ""
 
-def detect_language(text):
-    """Detects query language for seamless global user communication."""
-    # Check for Devanagari script (Hindi, Marathi, etc.)
-    if re.search(r'[\u0900-\u097F]', text):
-        return "Hindi"
-    
-    # Check for common Hinglish/Hindi romanized words
-    hinglish_tokens = ["kya", "kaise", "karna", "batao", "hai", "nahi", "chahiye", "mera", "meri", "karo", "mujhe", "bataiye"]
-    text_lower = text.lower()
-    if any(re.search(rf'\b{w}\b', text_lower) for w in hinglish_tokens):
-        return "Hinglish"
-        
-    # Check German
-    if any(re.search(rf'\b{w}\b', text_lower) for w in ["wie", "was", "ist", "bitte", "danke", "nicht", "kann", "steuer"]):
-        return "German"
-        
-    # Check French
-    if any(re.search(rf'\b{w}\b', text_lower) for w in ["comment", "pourquoi", "merci", "bonjour", "est", "une"]):
-        return "French"
-        
-    # Default to English
-    return "English"
+        return response.text or ""
 
-# ==========================================
-# 3. PING ENDPOINT (KEEPS BOT AWAKE 24x7)
-# ==========================================
-@app.route('/ping', methods=['GET'])
-@app.route('/api/ping', methods=['GET'])
-def ping():
-    return jsonify({
-        "status": "awake",
-        "service": "ServiceMoney Master AI",
-        "timestamp": time.time()
-    }), 200
+    except requests.RequestException as error:
+        logger.warning("Knowledge source fetch failed for %s: %s", url, error)
+        return ""
 
-# ==========================================
-# 4. CHATBOT QUERY ENDPOINT (/ask-ai)
-# ==========================================
-@app.route('/ask-ai', methods=['POST'])
-@app.route('/api/ask-ai', methods=['POST'])
-def ask_ai():
-    data = request.json or {}
-    user_query = data.get("query", data.get("prompt", "")).strip()
 
-    if not user_query:
-        return jsonify({"response": "Please provide your question."}), 400
+def classify_resource(title, url, description):
+    searchable = f"{title} {url} {description}".lower()
 
-    kb = fetch_dynamic_ecosystem()
-    detected_lang = detect_language(user_query)
-    query_lower = user_query.lower()
+    if TOOL_PATTERN.search(searchable):
+        return "tool"
 
-    # Intent Detection
-    has_audit_calc_intent = any(w in query_lower for w in [
-        "audit", "calculator", "calculate", "calute", "revenue", "turnover", 
-        "multiplication", "math", "hisab", "clautiom", "clautate", "erp", "tax math"
-    ])
-    has_wise_intent = any(w in query_lower for w in [
-        "wise", "transferwise", "foreign", "payout", "international", 
-        "remittance", "us to india", "paypal", "fincen", "cross border", "wire"
-    ])
-    has_gst_37a = any(w in query_lower for w in ["37a", "86b", "regulatory debt", "valuation"])
-    has_dpdp = any(w in query_lower for w in ["dpdp", "data privacy", "fiduciary"])
-    has_about_author = any(w in query_lower for w in ["anurag", "founder", "owner", "author", "about us", "who are you"])
+    return "article"
 
-    # Match User Query with ALL Existing and Future Tools/Articles
-    matched_tools = []
-    matched_articles = []
 
-    for item in kb:
-        # Check title and keyword overlap
+# ============================================================
+# RSS / ATOM FEED DISCOVERY
+# ============================================================
+
+def parse_feed(xml_text, site_name, base_url):
+    if not xml_text:
+        return []
+
+    try:
+        parsed = feedparser.parse(xml_text)
+    except Exception as error:
+        logger.warning("Could not parse feed for %s: %s", site_name, error)
+        return []
+
+    resources = []
+
+    for entry in getattr(parsed, "entries", []):
+        title = decode_html(entry.get("title", ""))
+        url = entry.get("link", "") or ""
+
+        if not url:
+            links = entry.get("links", []) or []
+
+            for link_item in links:
+                if link_item.get("rel") in (None, "alternate"):
+                    url = link_item.get("href", "")
+                    if url:
+                        break
+
+        url = absolute_url(url, base_url)
+
+        description = decode_html(
+            entry.get("summary", "")
+            or entry.get("description", "")
+            or entry.get("content", "")
+        )
+
+        category = None
+        tags = entry.get("tags", []) or []
+
+        if tags:
+            category = decode_html(tags[0].get("term", "")) or None
+
+        image = None
+
+        media_content = entry.get("media_content", []) or []
+        if media_content:
+            image = media_content[0].get("url")
+
+        if not image:
+            enclosures = entry.get("enclosures", []) or []
+            if enclosures:
+                image = enclosures[0].get("href")
+
+        if not image:
+            image_match = re.search(
+                r"<img[^>]+src=[\"']([^\"']+)",
+                str(entry.get("summary", "")),
+                flags=re.IGNORECASE,
+            )
+            if image_match:
+                image = image_match.group(1)
+
+        image = absolute_url(image, base_url) if image else None
+
+        if not title:
+            title = slug_title(url)
+
+        if not title or not url.startswith(("http://", "https://")):
+            continue
+
+        resources.append(
+            {
+                "title": title,
+                "url": url,
+                "site": site_name,
+                "kind": classify_resource(title, url, description),
+                "description": description[:360],
+                "image": image,
+                "category": category,
+            }
+        )
+
+    return resources
+
+
+def load_feed_resources(feed_url, site_name, base_url):
+    feed_text = fetch_text(feed_url)
+
+    if not feed_text:
+        return {
+            "online": False,
+            "resources": [],
+        }
+
+    return {
+        "online": True,
+        "resources": parse_feed(feed_text, site_name, base_url),
+    }
+
+
+# ============================================================
+# SITEMAP DISCOVERY
+# ============================================================
+
+def parse_sitemap_resources(sitemap_url, site_name):
+    index_text = fetch_text(sitemap_url)
+
+    if not index_text:
+        return []
+
+    sitemap_locations = [
+        html_lib.unescape(value.strip())
+        for value in re.findall(
+            r"<loc[^>]*>(.*?)</loc>",
+            index_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    ]
+
+    child_sitemaps = [
+        value
+        for value in sitemap_locations
+        if "sitemap" in value.lower()
+    ][:5]
+
+    documents = []
+
+    if child_sitemaps:
+        for child_sitemap in child_sitemaps:
+            child_text = fetch_text(child_sitemap)
+            if child_text:
+                documents.append(child_text)
+    else:
+        documents.append(index_text)
+
+    discovered_urls = []
+
+    for document in documents:
+        locations = re.findall(
+            r"<loc[^>]*>(.*?)</loc>",
+            document,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        for location in locations:
+            url = html_lib.unescape(location.strip())
+
+            if not url.startswith(("http://", "https://")):
+                continue
+
+            if re.search(
+                r"/(category|tag|author|feed|page)/",
+                url,
+                flags=re.IGNORECASE,
+            ):
+                continue
+
+            if not SITEMAP_DISCOVERY_PATTERN.search(url):
+                continue
+
+            discovered_urls.append(url)
+
+    unique_urls = list(dict.fromkeys(discovered_urls))[:120]
+    resources = []
+
+    for url in unique_urls:
+        title = slug_title(url)
+
+        resources.append(
+            {
+                "title": title,
+                "url": url,
+                "site": site_name,
+                "kind": (
+                    "tool"
+                    if TOOL_PATTERN.search(url)
+                    else "article"
+                ),
+                "description": (
+                    "A live resource discovered from the website sitemap."
+                ),
+                "image": None,
+                "category": None,
+            }
+        )
+
+    return resources
+
+
+# ============================================================
+# YOUTUBE DISCOVERY
+# ============================================================
+
+def parse_youtube_resources():
+    page_text = fetch_text(YOUTUBE_CHANNEL_URL)
+
+    fallback_channel = {
+        "title": "Educationanurag on YouTube",
+        "url": "https://www.youtube.com/@Educationanurag",
+        "site": "YouTube",
+        "kind": "page",
+        "description": (
+            "Official channel for Anurag Panchal's explainers and tutorials."
+        ),
+        "image": None,
+        "category": "Video",
+    }
+
+    if not page_text:
+        return [fallback_channel]
+
+    video_ids = re.findall(
+        r"\"videoId\":\"([^\"]+)\"",
+        page_text,
+    )
+
+    video_titles = re.findall(
+        r"\"title\":\{\"runs\":\[\{\"text\":\"((?:\\.|[^\"])*)\"",
+        page_text,
+    )
+
+    resources = []
+    used_ids = set()
+
+    for index, video_id in enumerate(video_ids[:12]):
+        if video_id in used_ids:
+            continue
+
+        used_ids.add(video_id)
+
+        raw_title = (
+            video_titles[index]
+            if index < len(video_titles)
+            else "Educationanurag video"
+        )
+
+        title = (
+            raw_title
+            .replace('\\"', '"')
+            .replace("\\u0026", "&")
+        )
+
+        resources.append(
+            {
+                "title": html_lib.unescape(title),
+                "url": (
+                    f"https://www.youtube.com/watch?v={video_id}"
+                ),
+                "site": "YouTube",
+                "kind": "video",
+                "description": (
+                    "A video from the official Educationanurag channel."
+                ),
+                "image": (
+                    f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                ),
+                "category": "Video",
+            }
+        )
+
+    resources.append(fallback_channel)
+    return resources
+
+
+# ============================================================
+# KNOWLEDGE SNAPSHOT AND CACHE
+# ============================================================
+
+knowledge_cache = None
+knowledge_cache_expires_at = 0
+knowledge_cache_lock = threading.Lock()
+
+
+def build_knowledge_snapshot():
+    service_feed_job = lambda: load_feed_resources(
+        SERVICE_MONEY_FEED,
+        "ServiceMoney.in",
+        "https://servicemoney.in/",
+    )
+
+    allround_feed_job = lambda: load_feed_resources(
+        ALLROUNDUPDATE_FEED,
+        "AllRoundUpdate.com",
+        "https://www.allroundupdate.com/",
+    )
+
+    service_sitemap_job = lambda: parse_sitemap_resources(
+        SERVICE_MONEY_SITEMAP,
+        "ServiceMoney.in",
+    )
+
+    allround_sitemap_job = lambda: parse_sitemap_resources(
+        ALLROUNDUPDATE_SITEMAP,
+        "AllRoundUpdate.com",
+    )
+
+    youtube_job = parse_youtube_resources
+
+    jobs = {
+        "service_feed": service_feed_job,
+        "allround_feed": allround_feed_job,
+        "service_sitemap": service_sitemap_job,
+        "allround_sitemap": allround_sitemap_job,
+        "youtube": youtube_job,
+    }
+
+    results = {}
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_map = {
+            name: executor.submit(job)
+            for name, job in jobs.items()
+        }
+
+        for name, future in future_map.items():
+            try:
+                results[name] = future.result()
+            except Exception as error:
+                logger.exception(
+                    "Knowledge loader failed for %s: %s",
+                    name,
+                    error,
+                )
+
+                if name.endswith("_feed"):
+                    results[name] = {
+                        "online": False,
+                        "resources": [],
+                    }
+                elif name == "youtube":
+                    results[name] = [parse_youtube_resources()[0]]
+                else:
+                    results[name] = []
+
+    service_feed_result = results.get(
+        "service_feed",
+        {"online": False, "resources": []},
+    )
+
+    allround_feed_result = results.get(
+        "allround_feed",
+        {"online": False, "resources": []},
+    )
+
+    service_feed_resources = service_feed_result["resources"]
+    allround_feed_resources = allround_feed_result["resources"]
+
+    service_sitemap_resources = results.get(
+        "service_sitemap",
+        [],
+    )
+
+    allround_sitemap_resources = results.get(
+        "allround_sitemap",
+        [],
+    )
+
+    youtube_resources = results.get("youtube", [])
+
+    fixed_resources = [
+        {
+            "title": "About Anurag Panchal",
+            "url": SERVICE_MONEY_ABOUT_URL,
+            "site": "ServiceMoney.in",
+            "kind": "page",
+            "description": (
+                "Learn about the author and the ServiceMoney.in "
+                "knowledge hub."
+            ),
+            "image": None,
+            "category": "About",
+        },
+        {
+            "title": "Finance on AllRoundUpdate.com",
+            "url": ALLROUNDUPDATE_FINANCE_URL,
+            "site": "AllRoundUpdate.com",
+            "kind": "page",
+            "description": (
+                "Browse the Finance category on AllRoundUpdate.com."
+            ),
+            "image": None,
+            "category": "Finance",
+        },
+    ]
+
+    resources_by_url = {}
+
+    all_resources = (
+        service_feed_resources
+        + allround_feed_resources
+        + service_sitemap_resources
+        + allround_sitemap_resources
+        + youtube_resources
+        + fixed_resources
+    )
+
+    for resource in all_resources:
+        url = resource.get("url")
+        if url:
+            resources_by_url[url] = resource
+
+    refreshed_at = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime(),
+    )
+
+    youtube_video_count = len(
+        [
+            resource
+            for resource in youtube_resources
+            if resource.get("kind") == "video"
+        ]
+    )
+
+    snapshot = {
+        "resources": list(resources_by_url.values()),
+        "refreshedAt": refreshed_at,
+        "sources": [
+            {
+                "site": "servicemoney.in",
+                "label": "ServiceMoney.in",
+                "status": (
+                    "online"
+                    if service_feed_result["online"]
+                    else (
+                        "partial"
+                        if service_feed_resources
+                        or service_sitemap_resources
+                        else "offline"
+                    )
+                ),
+                "itemCount": (
+                    len(service_feed_resources)
+                    + len(service_sitemap_resources)
+                ),
+                "refreshedAt": refreshed_at,
+            },
+            {
+                "site": "allroundupdate.com",
+                "label": "AllRoundUpdate.com",
+                "status": (
+                    "online"
+                    if allround_feed_result["online"]
+                    else (
+                        "partial"
+                        if allround_feed_resources
+                        or allround_sitemap_resources
+                        else "offline"
+                    )
+                ),
+                "itemCount": (
+                    len(allround_feed_resources)
+                    + len(allround_sitemap_resources)
+                ),
+                "refreshedAt": refreshed_at,
+            },
+            {
+                "site": "youtube.com/@Educationanurag",
+                "label": "Educationanurag",
+                "status": (
+                    "online"
+                    if youtube_video_count > 0
+                    else "partial"
+                ),
+                "itemCount": youtube_video_count,
+                "refreshedAt": refreshed_at,
+            },
+        ],
+    }
+
+    return snapshot
+
+
+def get_knowledge_snapshot():
+    global knowledge_cache
+    global knowledge_cache_expires_at
+
+    now = time.time()
+
+    with knowledge_cache_lock:
+        if knowledge_cache and knowledge_cache_expires_at > now:
+            return knowledge_cache
+
+    snapshot = build_knowledge_snapshot()
+
+    with knowledge_cache_lock:
+        knowledge_cache = snapshot
+        knowledge_cache_expires_at = time.time() + CACHE_SECONDS
+
+    return snapshot
+
+
+# ============================================================
+# RESOURCE MATCHING
+# ============================================================
+
+STOP_WORDS = {
+    "the",
+    "and",
+    "for",
+    "what",
+    "how",
+    "can",
+    "about",
+    "please",
+    "tell",
+    "with",
+    "from",
+    "this",
+    "that",
+    "mujhe",
+    "batao",
+    "kya",
+    "hai",
+    "ke",
+    "par",
+    "mein",
+    "mera",
+    "meri",
+    "ko",
+    "ka",
+    "ki",
+    "se",
+}
+
+
+def query_terms(query):
+    normalized = re.sub(
+        r"[^\w]+",
+        " ",
+        query.lower(),
+        flags=re.UNICODE,
+    )
+
+    terms = [
+        term
+        for term in normalized.split()
+        if len(term) > 2 and term not in STOP_WORDS
+    ]
+
+    return list(dict.fromkeys(terms))
+
+
+def find_relevant_resources(snapshot, query):
+    normalized_query = query.lower().strip()
+    terms = query_terms(query)
+    matches = []
+
+    for resource in snapshot.get("resources", []):
+        searchable = " ".join(
+            [
+                resource.get("title", ""),
+                resource.get("description", ""),
+                resource.get("url", ""),
+                resource.get("category") or "",
+            ]
+        ).lower()
+
         score = 0
-        for kw in item.get("keywords", []):
-            if kw in query_lower or query_lower in kw:
+
+        for term in terms:
+            if term in resource.get("title", "").lower():
+                score += 5
+            elif term in searchable:
                 score += 2
-        
-        # Word token matching
-        tokens = [t for t in re.split(r'\W+', query_lower) if len(t) > 3]
-        for token in tokens:
-            if token in item.get("title", "").lower():
-                score += 3
-            if token in item.get("description", "").lower():
-                score += 1
+
+        if normalized_query and normalized_query in searchable:
+            score += 8
+
+        calculation_query = re.search(
+            r"tool|calculate|calculator|audit|formula|solve|"
+            r"check|gst|erp|revenue",
+            query,
+            flags=re.IGNORECASE,
+        )
+
+        if (
+            resource.get("kind") == "tool"
+            and calculation_query
+        ):
+            score += 3
 
         if score > 0:
-            if item.get("is_tool") or "tool" in item.get("title", "").lower():
-                matched_tools.append(item)
-            else:
-                matched_articles.append(item)
+            copied_resource = dict(resource)
+            copied_resource["_score"] = score
+            matches.append(copied_resource)
 
-    # Build context string
-    context_str = ""
-    for item in (matched_tools + matched_articles)[:6]:
-        context_str += f"- [{item['platform']}] Title: {item['title']} | Category: {item.get('category', 'General')} | URL: {item['url']} | Summary: {item['description']}\n"
+    matches.sort(
+        key=lambda item: item.get("_score", 0),
+        reverse=True,
+    )
 
-    # Multilingual System Prompt
-    system_instruction = f"""You are 'ServiceMoney Master AI', an elite, helpful assistant representing Anurag Panchal's official network:
-1. servicemoney.in (Flagship: Financial audit tools, GST compliance, FinCEN, banking, ERP tools)
-2. allroundupdate.com (Sister Portal: Technology news, DPDP Act, GST Rule 37A & 86B valuation guide, business updates)
-3. YouTube (@Educationanurag): Practical video tutorials for Tally Prime, GST, and automation.
-4. Founder: Anurag Panchal
+    clean_matches = []
 
-CRITICAL RULES:
-1. LANGUAGE CONSISTENCY: The detected user language is '{detected_lang}'. Formulate your entire answer in '{detected_lang}'. If user wrote in German, reply in German. If in Hindi, reply in Hindi. If English, reply in English.
-2. DYNAMIC TOOL & BLOG SUGGESTION (CURRENT & FUTURE):
-   - Whenever a user asks for a calculation, audit, math, or problem solving, ALWAYS check the matching tools from ServiceMoney.in.
-   - For calculations/turnover/GST audits, specifically guide them to the 'Audit Calculator Tool' in the 'ERP Category' on ServiceMoney.in (https://servicemoney.in/category/erp/).
-   - If ANY new tool or article is present in the context below that solves their problem, proactively recommend it with its category and direct URL.
-3. CROSS-WEBSITE GUIDANCE:
-   - For 'DPDP Act' or 'GST Rule 37A & 86B: Stop Losing 15% Valuation', inform the user that this article is on sister site AllRoundUpdate.com (Finance Category, Page 2) with URL https://www.allroundupdate.com/search/label/Finance.
-4. AFFILIATE RECOMMENDATION (WISE):
-   - If the query is about international money transfer, foreign remittance, B2B payouts, PayPal alternatives, or Wise:
-   - Include a courteous invitation in the USER'S LANGUAGE offering fee-free first transfer via https://wise.com:
-     * In Hindi: "💡 **कमाई व बचत का मौका**: अगर आप अंतरराष्ट्रीय ट्रांसफर या B2B payouts के लिए Wise पर अकाउंट बनाना चाहते हैं, तो इस पार्टनर लिंक से साइन-अप करने पर आपको पहले ट्रांसफर पर कोई फीस नहीं देनी होगी: https://wise.com"
-     * In English: "💡 **Special Offer**: If you need to open an account for international payouts, using our partner link grants you a zero-fee first transfer: https://wise.com"
-     * For other languages, translate this concept smoothly into that language.
-5. YOUTUBE TUTORIALS:
-   - When appropriate for Tally Prime, practical GST filing, or accounting automation, recommend @Educationanurag (https://www.youtube.com/@Educationanurag).
-6. 100% COPYRIGHT-FREE & COMPREHENSIVE:
-   - Even if the exact topic is not covered on our websites, provide a thorough, accurate, and original explanation.
-   - Never copy external copyrighted text verbatim."""
+    for resource in matches[:6]:
+        resource.pop("_score", None)
+        clean_matches.append(resource)
 
-    prompt = f"""User Query: "{user_query}"
-Detected Language: {detected_lang}
+    return clean_matches
 
-Live Dynamic Knowledge Context:
-{context_str if context_str else "No direct internal post match. Answer using high-level expert intelligence while guiding the user to relevant ecosystem categories."}
 
-Tool Suggestion Needed: {"YES (Highlight Audit Calculator Tool in ERP on ServiceMoney.in)" if has_audit_calc_intent else "NO"}
-Wise Affiliate Offer Needed: {"YES (Append fee-free Wise invitation in user's language)" if has_wise_intent else "NO"}
-GST 37A / Valuation Intent: {"YES (Guide to AllRoundUpdate Finance Category Page 2)" if has_gst_37a else "NO"}
+def get_affiliate_suggestion(query):
+    transfer_query = re.search(
+        r"wise|paypal|remittance|transfer|cross[- ]?border|"
+        r"send money|विदेश|पैसे भेज",
+        query,
+        flags=re.IGNORECASE,
+    )
 
-Respond in {detected_lang}."""
+    if not transfer_query:
+        return None
+
+    affiliate_url = os.environ.get("WISE_AFFILIATE_URL")
+
+    if not affiliate_url:
+        return None
+
+    return {
+        "label": "Wise account offer",
+        "disclosure": (
+            "If you want to open a Wise account, signing up through "
+            "this link may waive the fee on your first transfer. "
+            "This is an affiliate link."
+        ),
+        "url": affiliate_url,
+    }
+
+
+def resource_context(resources):
+    if not resources:
+        return "No matching first-party resources were found."
+
+    lines = []
+
+    for resource in resources:
+        lines.append(
+            "- "
+            f"{resource.get('title')} | "
+            f"{resource.get('site')} | "
+            f"{resource.get('kind')} | "
+            f"{resource.get('url')} | "
+            f"{resource.get('description')}"
+        )
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# LANGUAGE DETECTION
+# ============================================================
+
+def detect_language(text):
+    if re.search(r"[\u0900-\u097F]", text):
+        return "Hindi"
+
+    if re.search(
+        r"\b(mujhe|batao|baare|mein|kya|hai|ke|par|ka|ki|ko|"
+        r"aap|apko|chahiye|samjhao|karo|karna)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return "Hinglish"
+
+    if re.search(r"[\u0400-\u04FF]", text):
+        return "Russian"
+
+    if re.search(r"[\u0600-\u06FF]", text):
+        return "Arabic"
+
+    if (
+        re.search(r"[À-ÿ]", text)
+        and re.search(
+            r"\b(le|la|les|des|une|pour|avec)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    ):
+        return "French"
+
+    if re.search(
+        r"\b(der|die|das|und|für|mit|eine)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return "German"
+
+    if re.search(
+        r"\b(el|la|los|las|para|con|una)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return "Spanish"
+
+    return "English"
+
+
+# ============================================================
+# GEMINI API
+# ============================================================
+
+def generate_gemini_answer(query, history, resources, language):
+    api_key = os.environ.get("GEMINI_API_KEY")
+
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not configured in environment variables."
+        )
+
+    prompt = f"""
+You are ServiceMoney Master AI, a careful multilingual assistant
+created by Anurag Panchal.
+
+You represent:
+- ServiceMoney.in
+- AllRoundUpdate.com
+- Educationanurag YouTube channel
+
+Reply in the same language as the user. The requested language is:
+{language}
+
+Rules:
+1. Answer the user's actual question first.
+2. Never repeat a generic greeting or old fallback answer.
+3. Use general knowledge for ordinary questions.
+4. Only mention a first-party article, tool, video, category, image,
+   or page when it appears in the verified resource list below.
+5. Do not invent URLs, categories, pagination numbers, tools, images,
+   or website content.
+6. If a matching tool exists, explain what the user can do with it.
+7. If the best resource is on AllRoundUpdate.com, say so clearly.
+8. If the best resource is on ServiceMoney.in, say so clearly.
+9. If no first-party resource matches, answer normally without
+   pretending that a site resource exists.
+10. Do not copy full articles or long copyrighted passages.
+11. Give original explanations and link users to the source pages.
+12. For legal, tax, financial, or compliance questions, avoid
+    absolute certainty and suggest professional verification when
+    appropriate.
+13. Keep the response concise but useful.
+
+Verified first-party resource candidates:
+{resource_context(resources)}
+
+Conversation history:
+{json.dumps(history[-12:], ensure_ascii=False)}
+
+Current user question:
+{query}
+""".strip()
+
+    endpoint = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent"
+    )
+
+    request_body = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }
+        ],
+        "generationConfig": {
+            "maxOutputTokens": 8192,
+        },
+    }
+
+    for attempt in range(2):
+        try:
+            response = requests.post(
+                endpoint,
+                params={"key": api_key},
+                headers={"Content-Type": "application/json"},
+                json=request_body,
+                timeout=45,
+            )
+
+        except requests.Timeout as error:
+            logger.warning("Gemini request timed out: %s", error)
+            raise TemporaryAssistantError(
+                TEMPORARY_ASSISTANT_MESSAGE
+            ) from error
+
+        except requests.RequestException as error:
+            if attempt == 0:
+                sleep(0.75)
+                continue
+
+            logger.warning("Gemini network request failed: %s", error)
+            raise TemporaryAssistantError(
+                TEMPORARY_ASSISTANT_MESSAGE
+            ) from error
+
+        if response.status_code in TRANSIENT_HTTP_STATUSES:
+            if attempt == 0:
+                sleep(0.75)
+                continue
+
+            logger.warning(
+                "Gemini temporary HTTP error %s: %s",
+                response.status_code,
+                response.text[:300],
+            )
+
+            raise TemporaryAssistantError(
+                TEMPORARY_ASSISTANT_MESSAGE
+            )
+
+        if not response.ok:
+            detail = response.text[:300].replace("\n", " ")
+            raise RuntimeError(
+                f"Gemini request failed with HTTP "
+                f"{response.status_code}: {detail}"
+            )
+
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise RuntimeError(
+                "Gemini returned an invalid JSON response."
+            ) from error
+
+        candidates = payload.get("candidates", [])
+
+        if not candidates:
+            raise RuntimeError("Gemini returned no candidates.")
+
+        parts = (
+            candidates[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+
+        answer = "".join(
+            part.get("text", "")
+            for part in parts
+            if isinstance(part, dict)
+        ).strip()
+
+        if not answer:
+            raise RuntimeError("Gemini returned an empty response.")
+
+        return answer
+
+    raise TemporaryAssistantError(TEMPORARY_ASSISTANT_MESSAGE)
+
+
+# ============================================================
+# API ROUTES
+# ============================================================
+
+@app.get("/ping")
+@app.get("/api/healthz")
+def health_check():
+    return jsonify({"status": "ok"}), 200
+
+
+@app.get("/api/assistant/knowledge-status")
+def knowledge_status():
+    try:
+        snapshot = get_knowledge_snapshot()
+
+        return jsonify(
+            {
+                "refreshedAt": snapshot["refreshedAt"],
+                "sources": snapshot["sources"],
+            }
+        ), 200
+
+    except Exception:
+        logger.exception("Knowledge status request failed")
+
+        return jsonify(
+            {
+                "error": (
+                    "Live knowledge sources are temporarily unavailable."
+                )
+            }
+        ), 503
+
+
+def chat_handler():
+    data = request.get_json(silent=True) or {}
+
+    query = str(data.get("query", "")).strip()
+
+    if not query:
+        return jsonify(
+            {
+                "error": (
+                    "Please enter a question up to 4,000 characters."
+                )
+            }
+        ), 400
+
+    if len(query) > 4000:
+        return jsonify(
+            {
+                "error": (
+                    "Please enter a question up to 4,000 characters."
+                )
+            }
+        ), 400
+
+    raw_history = data.get("history", [])
+    history = []
+
+    if isinstance(raw_history, list):
+        for turn in raw_history[-12:]:
+            if not isinstance(turn, dict):
+                continue
+
+            role = turn.get("role")
+            content = turn.get("content")
+
+            if role in ("user", "assistant") and isinstance(content, str):
+                history.append(
+                    {
+                        "role": role,
+                        "content": content[:4000],
+                    }
+                )
 
     try:
-        # Use gemini-2.5-flash: high speed, reliable, zero deprecation issues
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction
-            )
+        snapshot = get_knowledge_snapshot()
+        resources = find_relevant_resources(snapshot, query)
+        language = detect_language(query)
+
+        answer = generate_gemini_answer(
+            query=query,
+            history=history,
+            resources=resources,
+            language=language,
         )
-        if response and response.text:
-            return jsonify({
-                "response": response.text,
-                "answer": response.text,
-                "language": detected_lang,
-                "status": "success"
-            }), 200
-        else:
-            return jsonify({"response": "I am ready to help you with ServiceMoney tools, GST, and tech updates."}), 200
 
-    except Exception as e:
-        print(f"Gemini API Exception: {e}")
-        # Multilingual intelligent fallback
-        if detected_lang in ["Hindi", "Hinglish"]:
-            if has_audit_calc_intent:
-                fallback = "नमस्ते! आपके कैलकुलेशन या ऑडिट संबंधी सवाल के लिए **ServiceMoney.in** पर **Audit Calculator Tool** उपलब्ध है। आप **ERP & Compliance** केटेगरी में जाकर डायरेक्ट GST व रेवेन्यू कैलकुलेट कर सकते हैं: https://servicemoney.in/category/erp/"
-            elif has_wise_intent:
-                fallback = "नमस्ते! अंतरराष्ट्रीय ट्रांसफर या B2B payouts के लिए आप **Wise** का उपयोग कर सकते हैं। पार्टनर लिंक से पहले ट्रांसफर पर ज़ीरो फीस का लाभ उठाएं: https://wise.com"
-            else:
-                fallback = "नमस्ते! आपके सवाल के समाधान के लिए आप **ServiceMoney.in** के ERP टूल्स और **AllRoundUpdate.com** के फाइनेंस आर्टिकल्स देख सकते हैं। वीडियो ट्यूटोरियल्स के लिए हमारे यूट्यूब चैनल **@Educationanurag** (https://www.youtube.com/@Educationanurag) पर विजिट करें।"
-        else:
-            if has_audit_calc_intent:
-                fallback = "Hello! For your calculation or audit requirements, **ServiceMoney.in** provides an **Audit Calculator Tool** in the **ERP & Compliance** category: https://servicemoney.in/category/erp/"
-            elif has_wise_intent:
-                fallback = "Hello! For international transfers or business payouts, you can use **Wise**. Get zero fees on your first transfer using our official partner link: https://wise.com"
-            else:
-                fallback = "Hello! You can explore dedicated compliance tools on **ServiceMoney.in** and in-depth tech updates on **AllRoundUpdate.com**. For video tutorials, visit our YouTube channel **@Educationanurag** (https://www.youtube.com/@Educationanurag)."
+        return jsonify(
+            {
+                "response": answer,
+                "language": language,
+                "resources": resources,
+                "affiliate": get_affiliate_suggestion(query),
+                "knowledgeUpdatedAt": snapshot["refreshedAt"],
+            }
+        ), 200
 
-        return jsonify({
-            "response": fallback,
-            "answer": fallback,
-            "error_debug": str(e)
-        }), 200
+    except TemporaryAssistantError:
+        logger.warning(
+            "Temporary assistant provider failure for query."
+        )
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+        return jsonify(
+            {
+                "error": TEMPORARY_ASSISTANT_MESSAGE,
+            }
+        ), 503
+
+    except Exception:
+        logger.exception("Assistant request failed")
+
+        return jsonify(
+            {
+                "error": (
+                    "The assistant is temporarily unavailable. "
+                    "Please try again shortly."
+                )
+            }
+        ), 503
+
+
+@app.post("/api/assistant/chat")
+def assistant_chat():
+    return chat_handler()
+
+
+# Legacy endpoint compatible with the original Flask code.
+@app.post("/ask-ai")
+def legacy_ask_ai():
+    return chat_handler()
+
+
+# ============================================================
+# SERVER START
+# ============================================================
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "5000"))
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+    )
+```
+
+### Install dependencies
+
+```bash
+pip install Flask flask-cors requests feedparser
+```
+
+### Required environment variable
+
+```bash
+GEMINI_API_KEY=your_gemini_key
+```
+
+Optional variables:
+
+```bash
+GEMINI_MODEL=gemini-3.6-flash
+WISE_AFFILIATE_URL=your_wise_affiliate_link
+ALLOWED_ORIGINS=https://servicemoney.in,https://www.servicemoney.in,https://allroundupdate.com,https://www.allroundupdate.com
+```
+
+Run karne ke liye:
+
+```bash
+python app.py
+```
+
+API endpoint:
+
+```text
+POST /api/assistant/chat
+```
+
+Example request:
+
+```json
+{
+  "query": "GST calculator kaise use karun?",
+  "history": []
+}
+```
+
+Old frontend compatibility ke liye yeh endpoint bhi available hai:
+
+```text
+POST /ask-ai
+```
+
+Important: Gemini API key ko code me hardcode na karein. Attached old Python code me visible keys thi; agar woh real keys hain to unhe revoke karke new keys generate karein.
