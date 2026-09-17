@@ -938,8 +938,9 @@ def chat_handler():
         logger.warning(
             "Temporary assistant provider failure for query."
         )
-        return jsonify(
+       return jsonify(
             {
                 "error": TEMPORARY_ASSISTANT_MESSAGE,
-            } 
+            }
+        )
 
