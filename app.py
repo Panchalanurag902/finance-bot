@@ -1,23 +1,3 @@
-Neeche standalone `app.py` diya hai. Yeh current Replit bot ka Flask equivalent hai aur isme:
-
-- Flask server
-- WordPress/Blogger CORS
-- Gemini API via `os.environ.get("GEMINI_API_KEY")`
-- Configurable `GEMINI_MODEL`
-- Multilingual prompt
-- ServiceMoney RSS
-- AllRoundUpdate RSS
-- Sitemap se future articles/tools discovery
-- Educationanurag YouTube discovery
-- Relevant article/tool/video matching
-- Wise affiliate suggestion
-- 5-minute knowledge cache
-- Timeout, 429, 502, 503, 504 error handling
-- `/api/assistant/chat` aur old `/ask-ai` endpoint
-
-Important: current Replit project ka live backend TypeScript me hai. Yeh code GitHub ke standalone Python Flask deployment ke liye hai.
-
-```python
 import html as html_lib
 import json
 import logging
