@@ -292,16 +292,47 @@ def parse_feed(xml_text, site_name, base_url):
     return resources
 
 
-def load_feed_resources(feed_url, site_name, base_url):
-    feed_text = fetch_text(feed_url)
-    if not feed_text:
-        return {
-            "online": False,
-            "resources": [],
-        }
+ALLROUNDUPDATE_BLOG_ID = "4909867649872861965"
+
+
+def allroundupdate_feed_candidates(primary):
+    """Primary feed first, then backup addresses for the same Blogger blog."""
+    candidates = [
+        primary,
+        (
+            "https://www.blogger.com/feeds/"
+            f"{ALLROUNDUPDATE_BLOG_ID}/posts/summary?alt=rss&max-results=50"
+        ),
+        "https://www.allroundupdate.com/feeds/posts/summary?max-results=50",
+        "https://allroundupdate.com/feeds/posts/summary?alt=rss&max-results=50",
+        "https://www.allroundupdate.com/feeds/posts/default?alt=rss&max-results=20",
+    ]
+    return list(dict.fromkeys(candidates))
+
+
+def load_feed_resources(feed_url, site_name, base_url, fallbacks=()):
+    urls = [feed_url] + [u for u in fallbacks if u != feed_url]
+    for url in urls:
+        feed_text = fetch_text(url)
+        if not feed_text:
+            logger.warning("Feed gave no data for %s: %s", site_name, url)
+            continue
+        resources = parse_feed(feed_text, site_name, base_url)
+        if resources:
+            logger.info(
+                "Feed OK for %s: %s items from %s",
+                site_name,
+                len(resources),
+                url,
+            )
+            return {
+                "online": True,
+                "resources": resources,
+            }
+        logger.warning("Feed had no items for %s: %s", site_name, url)
     return {
-        "online": True,
-        "resources": parse_feed(feed_text, site_name, base_url),
+        "online": False,
+        "resources": [],
     }
 
 # ============================================================
@@ -465,6 +496,7 @@ def build_knowledge_snapshot():
         ALLROUNDUPDATE_FEED,
         "AllRoundUpdate.com",
         "https://www.allroundupdate.com/",
+        fallbacks=allroundupdate_feed_candidates(ALLROUNDUPDATE_FEED),
     )
     service_sitemap_job = lambda: parse_sitemap_resources(
         SERVICE_MONEY_SITEMAP,
@@ -646,9 +678,15 @@ def get_knowledge_snapshot():
 
     snapshot = build_knowledge_snapshot()
 
+    all_online = all(
+        source.get("status") == "online"
+        for source in snapshot.get("sources", [])
+    )
+    ttl = CACHE_SECONDS if all_online else 60
+
     with knowledge_cache_lock:
         knowledge_cache = snapshot
-        knowledge_cache_expires_at = time.time() + CACHE_SECONDS
+        knowledge_cache_expires_at = time.time() + ttl
 
     return snapshot
 
@@ -980,6 +1018,37 @@ def knowledge_status():
                 )
             }
         ), 503
+
+
+@app.get("/api/assistant/debug-feeds")
+def debug_feeds():
+    """Shows exactly what the server gets from each AllRoundUpdate address."""
+    urls = allroundupdate_feed_candidates(ALLROUNDUPDATE_FEED) + [
+        ALLROUNDUPDATE_SITEMAP,
+    ]
+    report = []
+    for url in urls:
+        try:
+            response = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
+            items = 0
+            if response.ok and "sitemap" not in url:
+                items = len(feedparser.parse(response.text).entries)
+            report.append(
+                {
+                    "url": url,
+                    "status": response.status_code,
+                    "bytes": len(response.content),
+                    "items": items,
+                }
+            )
+        except Exception as error:
+            report.append(
+                {
+                    "url": url,
+                    "error": f"{type(error).__name__}: {str(error)[:160]}",
+                }
+            )
+    return jsonify(report), 200
 
 
 @app.post("/")
