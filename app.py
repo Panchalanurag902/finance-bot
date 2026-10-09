@@ -8,14 +8,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from time import sleep
 from urllib.parse import urljoin, urlparse
+
 import feedparser
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("smart-knowledge-bot")
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -51,24 +55,30 @@ GEMINI_MODEL = os.environ.get(
     "GEMINI_MODEL",
     "gemini-3.6-flash",
 )
+
 CACHE_SECONDS = 5 * 60
+
 HTTP_HEADERS = {
     "User-Agent": (
         "SmartKnowledgeBot/1.0 "
         "(+https://servicemoney.in)"
     )
 }
+
 TOOL_PATTERN = re.compile(
     r"calculator|calculate|audit|tool|utility|checker|generator|"
     r"formula|solve|erp",
     re.IGNORECASE,
 )
+
 SITEMAP_DISCOVERY_PATTERN = re.compile(
     r"tool|calculator|audit|gst|tax|finance|erp|revenue|"
     r"compliance|accounting",
     re.IGNORECASE,
 )
+
 TRANSIENT_HTTP_STATUSES = {429, 502, 503, 504}
+
 # ============================================================
 # CORS
 # ============================================================
@@ -88,6 +98,7 @@ else:
         "http://localhost:3000",
         "http://localhost:5000",
     ]
+
 CORS(
     app,
     resources={
@@ -98,15 +109,19 @@ CORS(
         }
     },
 )
+
 # ============================================================
 # ERROR TYPES
 # ============================================================
 class TemporaryAssistantError(Exception):
     """Temporary Gemini/network failure safe for frontend responses."""
+
+
 TEMPORARY_ASSISTANT_MESSAGE = (
     "The assistant is taking a brief pause. "
     "Please try asking your question again in a moment."
 )
+
 # ============================================================
 # BASIC HELPERS
 # ============================================================
@@ -123,6 +138,8 @@ def decode_html(value):
     value = html_lib.unescape(value)
     value = re.sub(r"\s+", " ", value)
     return value.strip()
+
+
 def absolute_url(value, base_url):
     if not value:
         return ""
@@ -130,6 +147,8 @@ def absolute_url(value, base_url):
         return urljoin(base_url, value)
     except Exception:
         return value
+
+
 def slug_title(url):
     try:
         path_parts = [
@@ -143,6 +162,8 @@ def slug_title(url):
         return slug.title()
     except Exception:
         return url
+
+
 def fetch_text(url, timeout=8):
     """
     Returns an empty string when a source is unavailable.
@@ -165,11 +186,14 @@ def fetch_text(url, timeout=8):
     except requests.RequestException as error:
         logger.warning("Knowledge source fetch failed for %s: %s", url, error)
         return ""
+
+
 def classify_resource(title, url, description):
     searchable = f"{title} {url} {description}".lower()
     if TOOL_PATTERN.search(searchable):
         return "tool"
     return "article"
+
 # ============================================================
 # RSS / ATOM FEED DISCOVERY
 # ============================================================
@@ -181,10 +205,12 @@ def parse_feed(xml_text, site_name, base_url):
     except Exception as error:
         logger.warning("Could not parse feed for %s: %s", site_name, error)
         return []
+
     resources = []
     for entry in getattr(parsed, "entries", []):
         title = decode_html(entry.get("title", ""))
         url = entry.get("link", "") or ""
+
         if not url:
             links = entry.get("links", []) or []
             for link_item in links:
@@ -192,16 +218,20 @@ def parse_feed(xml_text, site_name, base_url):
                     url = link_item.get("href", "")
                     if url:
                         break
+
         url = absolute_url(url, base_url)
+
         description = decode_html(
             entry.get("summary", "")
             or entry.get("description", "")
             or entry.get("content", "")
         )
+
         category = None
         tags = entry.get("tags", []) or []
         if tags:
             category = decode_html(tags[0].get("term", "")) or None
+
         image = None
         media_content = entry.get("media_content", []) or []
         if media_content:
@@ -219,10 +249,12 @@ def parse_feed(xml_text, site_name, base_url):
             if image_match:
                 image = image_match.group(1)
         image = absolute_url(image, base_url) if image else None
+
         if not title:
             title = slug_title(url)
         if not title or not url.startswith(("http://", "https://")):
             continue
+
         resources.append(
             {
                 "title": title,
@@ -235,6 +267,8 @@ def parse_feed(xml_text, site_name, base_url):
             }
         )
     return resources
+
+
 def load_feed_resources(feed_url, site_name, base_url):
     feed_text = fetch_text(feed_url)
     if not feed_text:
@@ -246,6 +280,7 @@ def load_feed_resources(feed_url, site_name, base_url):
         "online": True,
         "resources": parse_feed(feed_text, site_name, base_url),
     }
+
 # ============================================================
 # SITEMAP DISCOVERY
 # ============================================================
@@ -253,6 +288,7 @@ def parse_sitemap_resources(sitemap_url, site_name):
     index_text = fetch_text(sitemap_url)
     if not index_text:
         return []
+
     sitemap_locations = [
         html_lib.unescape(value.strip())
         for value in re.findall(
@@ -261,11 +297,13 @@ def parse_sitemap_resources(sitemap_url, site_name):
             flags=re.IGNORECASE | re.DOTALL,
         )
     ]
+
     child_sitemaps = [
         value
         for value in sitemap_locations
         if "sitemap" in value.lower()
     ][:5]
+
     documents = []
     if child_sitemaps:
         for child_sitemap in child_sitemaps:
@@ -274,6 +312,7 @@ def parse_sitemap_resources(sitemap_url, site_name):
                 documents.append(child_text)
     else:
         documents.append(index_text)
+
     discovered_urls = []
     for document in documents:
         locations = re.findall(
@@ -294,7 +333,9 @@ def parse_sitemap_resources(sitemap_url, site_name):
             if not SITEMAP_DISCOVERY_PATTERN.search(url):
                 continue
             discovered_urls.append(url)
+
     unique_urls = list(dict.fromkeys(discovered_urls))[:120]
+
     resources = []
     for url in unique_urls:
         title = slug_title(url)
@@ -316,11 +357,13 @@ def parse_sitemap_resources(sitemap_url, site_name):
             }
         )
     return resources
+
 # ============================================================
 # YOUTUBE DISCOVERY
 # ============================================================
 def parse_youtube_resources():
     page_text = fetch_text(YOUTUBE_CHANNEL_URL)
+
     fallback_channel = {
         "title": "Educationanurag on YouTube",
         "url": "https://www.youtube.com/@Educationanurag",
@@ -332,8 +375,10 @@ def parse_youtube_resources():
         "image": None,
         "category": "Video",
     }
+
     if not page_text:
         return [fallback_channel]
+
     video_ids = re.findall(
         r"\"videoId\":\"([^\"]+)\"",
         page_text,
@@ -342,12 +387,15 @@ def parse_youtube_resources():
         r"\"title\":\{\"runs\":\[\{\"text\":\"((?:\\.|[^\"])*)\"",
         page_text,
     )
+
     resources = []
     used_ids = set()
+
     for index, video_id in enumerate(video_ids[:12]):
         if video_id in used_ids:
             continue
         used_ids.add(video_id)
+
         raw_title = (
             video_titles[index]
             if index < len(video_titles)
@@ -358,31 +406,32 @@ def parse_youtube_resources():
             .replace('\\"', '"')
             .replace("\\u0026", "&")
         )
+
         resources.append(
             {
                 "title": html_lib.unescape(title),
-                "url": (
-                    f"https://www.youtube.com/watch?v={video_id}"
-                ),
+                "url": f"https://www.youtube.com/watch?v={video_id}",
                 "site": "YouTube",
                 "kind": "video",
                 "description": (
                     "A video from the official Educationanurag channel."
                 ),
-                "image": (
-                    f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-                ),
+                "image": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
                 "category": "Video",
             }
         )
+
     resources.append(fallback_channel)
     return resources
+
 # ============================================================
 # KNOWLEDGE SNAPSHOT AND CACHE
 # ============================================================
 knowledge_cache = None
 knowledge_cache_expires_at = 0
 knowledge_cache_lock = threading.Lock()
+
+
 def build_knowledge_snapshot():
     service_feed_job = lambda: load_feed_resources(
         SERVICE_MONEY_FEED,
@@ -403,6 +452,7 @@ def build_knowledge_snapshot():
         "AllRoundUpdate.com",
     )
     youtube_job = parse_youtube_resources
+
     jobs = {
         "service_feed": service_feed_job,
         "allround_feed": allround_feed_job,
@@ -410,6 +460,7 @@ def build_knowledge_snapshot():
         "allround_sitemap": allround_sitemap_job,
         "youtube": youtube_job,
     }
+
     results = {}
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_map = {
@@ -434,6 +485,7 @@ def build_knowledge_snapshot():
                     results[name] = [parse_youtube_resources()[0]]
                 else:
                     results[name] = []
+
     service_feed_result = results.get(
         "service_feed",
         {"online": False, "resources": []},
@@ -442,17 +494,13 @@ def build_knowledge_snapshot():
         "allround_feed",
         {"online": False, "resources": []},
     )
+
     service_feed_resources = service_feed_result["resources"]
     allround_feed_resources = allround_feed_result["resources"]
-    service_sitemap_resources = results.get(
-        "service_sitemap",
-        [],
-    )
-    allround_sitemap_resources = results.get(
-        "allround_sitemap",
-        [],
-    )
+    service_sitemap_resources = results.get("service_sitemap", [])
+    allround_sitemap_resources = results.get("allround_sitemap", [])
     youtube_resources = results.get("youtube", [])
+
     fixed_resources = [
         {
             "title": "About Anurag Panchal",
@@ -478,6 +526,7 @@ def build_knowledge_snapshot():
             "category": "Finance",
         },
     ]
+
     resources_by_url = {}
     all_resources = (
         service_feed_resources
@@ -491,10 +540,12 @@ def build_knowledge_snapshot():
         url = resource.get("url")
         if url:
             resources_by_url[url] = resource
+
     refreshed_at = time.strftime(
         "%Y-%m-%dT%H:%M:%SZ",
         time.gmtime(),
     )
+
     youtube_video_count = len(
         [
             resource
@@ -502,6 +553,7 @@ def build_knowledge_snapshot():
             if resource.get("kind") == "video"
         ]
     )
+
     snapshot = {
         "resources": list(resources_by_url.values()),
         "refreshedAt": refreshed_at,
@@ -558,49 +610,35 @@ def build_knowledge_snapshot():
         ],
     }
     return snapshot
+
+
 def get_knowledge_snapshot():
     global knowledge_cache
     global knowledge_cache_expires_at
+
     now = time.time()
     with knowledge_cache_lock:
         if knowledge_cache and knowledge_cache_expires_at > now:
             return knowledge_cache
+
     snapshot = build_knowledge_snapshot()
+
     with knowledge_cache_lock:
         knowledge_cache = snapshot
         knowledge_cache_expires_at = time.time() + CACHE_SECONDS
+
     return snapshot
+
 # ============================================================
 # RESOURCE MATCHING
 # ============================================================
 STOP_WORDS = {
-    "the",
-    "and",
-    "for",
-    "what",
-    "how",
-    "can",
-    "about",
-    "please",
-    "tell",
-    "with",
-    "from",
-    "this",
-    "that",
-    "mujhe",
-    "batao",
-    "kya",
-    "hai",
-    "ke",
-    "par",
-    "mein",
-    "mera",
-    "meri",
-    "ko",
-    "ka",
-    "ki",
-    "se",
+    "the", "and", "for", "what", "how", "can", "about", "please",
+    "tell", "with", "from", "this", "that", "mujhe", "batao", "kya",
+    "hai", "ke", "par", "mein", "mera", "meri", "ko", "ka", "ki", "se",
 }
+
+
 def query_terms(query):
     normalized = re.sub(
         r"[^\w]+",
@@ -614,10 +652,13 @@ def query_terms(query):
         if len(term) > 2 and term not in STOP_WORDS
     ]
     return list(dict.fromkeys(terms))
+
+
 def find_relevant_resources(snapshot, query):
     normalized_query = query.lower().strip()
     terms = query_terms(query)
     matches = []
+
     for resource in snapshot.get("resources", []):
         searchable = " ".join(
             [
@@ -627,38 +668,43 @@ def find_relevant_resources(snapshot, query):
                 resource.get("category") or "",
             ]
         ).lower()
+
         score = 0
         for term in terms:
             if term in resource.get("title", "").lower():
                 score += 5
             elif term in searchable:
                 score += 2
+
         if normalized_query and normalized_query in searchable:
             score += 8
+
         calculation_query = re.search(
             r"tool|calculate|calculator|audit|formula|solve|"
             r"check|gst|erp|revenue",
             query,
             flags=re.IGNORECASE,
         )
-        if (
-            resource.get("kind") == "tool"
-            and calculation_query
-        ):
+        if resource.get("kind") == "tool" and calculation_query:
             score += 3
+
         if score > 0:
             copied_resource = dict(resource)
             copied_resource["_score"] = score
             matches.append(copied_resource)
+
     matches.sort(
         key=lambda item: item.get("_score", 0),
         reverse=True,
     )
+
     clean_matches = []
     for resource in matches[:6]:
         resource.pop("_score", None)
         clean_matches.append(resource)
     return clean_matches
+
+
 def get_affiliate_suggestion(query):
     transfer_query = re.search(
         r"wise|paypal|remittance|transfer|cross[- ]?border|"
@@ -668,9 +714,11 @@ def get_affiliate_suggestion(query):
     )
     if not transfer_query:
         return None
+
     affiliate_url = os.environ.get("WISE_AFFILIATE_URL")
     if not affiliate_url:
         return None
+
     return {
         "label": "Wise account offer",
         "disclosure": (
@@ -680,6 +728,8 @@ def get_affiliate_suggestion(query):
         ),
         "url": affiliate_url,
     }
+
+
 def resource_context(resources):
     if not resources:
         return "No matching first-party resources were found."
@@ -694,6 +744,7 @@ def resource_context(resources):
             f"{resource.get('description')}"
         )
     return "\n".join(lines)
+
 # ============================================================
 # LANGUAGE DETECTION
 # ============================================================
@@ -733,6 +784,7 @@ def detect_language(text):
     ):
         return "Spanish"
     return "English"
+
 # ============================================================
 # GEMINI API
 # ============================================================
@@ -742,15 +794,19 @@ def generate_gemini_answer(query, history, resources, language):
         raise RuntimeError(
             "GEMINI_API_KEY is not configured in environment variables."
         )
+
     prompt = f"""
 You are ServiceMoney Master AI, a careful multilingual assistant
 created by Anurag Panchal.
+
 You represent:
 - ServiceMoney.in
 - AllRoundUpdate.com
 - Educationanurag YouTube channel
+
 Reply in the same language as the user. The requested language is:
 {language}
+
 Rules:
 1. Answer the user's actual question first.
 2. Never repeat a generic greeting or old fallback answer.
@@ -770,17 +826,22 @@ Rules:
     absolute certainty and suggest professional verification when
     appropriate.
 13. Keep the response concise but useful.
+
 Verified first-party resource candidates:
 {resource_context(resources)}
+
 Conversation history:
 {json.dumps(history[-12:], ensure_ascii=False)}
+
 Current user question:
 {query}
 """.strip()
+
     endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent"
     )
+
     request_body = {
         "contents": [
             {
@@ -792,6 +853,7 @@ Current user question:
             "maxOutputTokens": 8192,
         },
     }
+
     for attempt in range(2):
         try:
             response = requests.post(
@@ -814,6 +876,7 @@ Current user question:
             raise TemporaryAssistantError(
                 TEMPORARY_ASSISTANT_MESSAGE
             ) from error
+
         if response.status_code in TRANSIENT_HTTP_STATUSES:
             if attempt == 0:
                 sleep(0.75)
@@ -823,24 +886,26 @@ Current user question:
                 response.status_code,
                 response.text[:300],
             )
-            raise TemporaryAssistantError(
-                TEMPORARY_ASSISTANT_MESSAGE
-            )
+            raise TemporaryAssistantError(TEMPORARY_ASSISTANT_MESSAGE)
+
         if not response.ok:
             detail = response.text[:300].replace("\n", " ")
             raise RuntimeError(
                 f"Gemini request failed with HTTP "
                 f"{response.status_code}: {detail}"
             )
+
         try:
             payload = response.json()
         except ValueError as error:
             raise RuntimeError(
                 "Gemini returned an invalid JSON response."
             ) from error
+
         candidates = payload.get("candidates", [])
         if not candidates:
             raise RuntimeError("Gemini returned no candidates.")
+
         parts = (
             candidates[0]
             .get("content", {})
@@ -851,17 +916,28 @@ Current user question:
             for part in parts
             if isinstance(part, dict)
         ).strip()
+
         if not answer:
             raise RuntimeError("Gemini returned an empty response.")
+
         return answer
+
     raise TemporaryAssistantError(TEMPORARY_ASSISTANT_MESSAGE)
+
 # ============================================================
 # API ROUTES
 # ============================================================
+@app.get("/")
+def home():
+    return jsonify({"status": "ok", "service": "smart-knowledge-bot"}), 200
+
+
 @app.get("/ping")
 @app.get("/api/healthz")
 def health_check():
     return jsonify({"status": "ok"}), 200
+
+
 @app.get("/api/assistant/knowledge-status")
 def knowledge_status():
     try:
@@ -881,25 +957,19 @@ def knowledge_status():
                 )
             }
         ), 503
+
+
+@app.post("/")
+@app.post("/chat")
+@app.post("/ask-ai")
 def chat_handler():
     data = request.get_json(silent=True) or {}
-    query = str(data.get("query", "")).strip()
-    if not query:
-        return jsonify(
-            {
-                "error": (
-                    "Please enter a question up to 4,000 characters."
-                )
-            }
-        ), 400
-    if len(query) > 4000:
-        return jsonify(
-            {
-                "error": (
-                    "Please enter a question up to 4,000 characters."
-                )
-            }
-        ), 400
+    query = str(data.get("query") or data.get("message") or "").strip()
+
+    if not query or len(query) > 4000:
+        message = "Please enter a question up to 4,000 characters."
+        return jsonify({"response": message, "error": message}), 400
+
     raw_history = data.get("history", [])
     history = []
     if isinstance(raw_history, list):
@@ -915,6 +985,7 @@ def chat_handler():
                         "content": content[:4000],
                     }
                 )
+
     try:
         snapshot = get_knowledge_snapshot()
         resources = find_relevant_resources(snapshot, query)
@@ -934,13 +1005,29 @@ def chat_handler():
                 "knowledgeUpdatedAt": snapshot["refreshedAt"],
             }
         ), 200
+
     except TemporaryAssistantError:
-        logger.warning(
-            "Temporary assistant provider failure for query."
-        )
+        logger.warning("Temporary assistant provider failure for query.")
         return jsonify(
             {
+                "response": TEMPORARY_ASSISTANT_MESSAGE,
                 "error": TEMPORARY_ASSISTANT_MESSAGE,
             }
-        )
+        ), 503
 
+    except Exception:
+        logger.exception("Chat handler failed")
+        return jsonify(
+            {
+                "response": (
+                    "Something went wrong on the server. "
+                    "Please try again."
+                ),
+                "error": "internal_error",
+            }
+        ), 500
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
