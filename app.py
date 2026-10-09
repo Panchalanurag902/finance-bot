@@ -29,7 +29,7 @@ SERVICE_MONEY_FEED = os.environ.get(
 )
 ALLROUNDUPDATE_FEED = os.environ.get(
     "BLOGGER_FEED_URL",
-    "https://www.allroundupdate.com/feeds/posts/default?alt=rss&max-results=50",
+    "https://www.allroundupdate.com/feeds/posts/summary?alt=rss&max-results=50",
 )
 SERVICE_MONEY_SITEMAP = os.environ.get(
     "SERVICEMONEY_SITEMAP_URL",
@@ -63,6 +63,19 @@ HTTP_HEADERS = {
         "SmartKnowledgeBot/1.0 "
         "(+https://servicemoney.in)"
     )
+}
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": (
+        "application/rss+xml, application/xml, text/xml, "
+        "text/html;q=0.9, */*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 TOOL_PATTERN = re.compile(
@@ -164,28 +177,34 @@ def slug_title(url):
         return url
 
 
-def fetch_text(url, timeout=8):
+def fetch_text(url, timeout=15):
     """
     Returns an empty string when a source is unavailable.
     A single failed feed will not crash the complete knowledge loader.
+    Retries once with browser-like headers if the site rejects the bot.
     """
-    try:
-        response = requests.get(
-            url,
-            headers=HTTP_HEADERS,
-            timeout=timeout,
-        )
-        if not response.ok:
+    for headers in (HTTP_HEADERS, BROWSER_HEADERS):
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+            )
+            if response.ok:
+                return response.text or ""
             logger.warning(
                 "Knowledge source returned HTTP %s: %s",
                 response.status_code,
                 url,
             )
+        except requests.Timeout as error:
+            logger.warning("Knowledge source timed out for %s: %s", url, error)
             return ""
-        return response.text or ""
-    except requests.RequestException as error:
-        logger.warning("Knowledge source fetch failed for %s: %s", url, error)
-        return ""
+        except requests.RequestException as error:
+            logger.warning(
+                "Knowledge source fetch failed for %s: %s", url, error
+            )
+    return ""
 
 
 def classify_resource(title, url, description):
@@ -236,6 +255,10 @@ def parse_feed(xml_text, site_name, base_url):
         media_content = entry.get("media_content", []) or []
         if media_content:
             image = media_content[0].get("url")
+        if not image:
+            thumbnails = entry.get("media_thumbnail", []) or []
+            if thumbnails:
+                image = thumbnails[0].get("url")
         if not image:
             enclosures = entry.get("enclosures", []) or []
             if enclosures:
