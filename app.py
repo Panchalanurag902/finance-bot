@@ -915,7 +915,7 @@ Current user question:
         },
     }
 
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             response = requests.post(
                 endpoint,
@@ -930,8 +930,8 @@ Current user question:
                 TEMPORARY_ASSISTANT_MESSAGE
             ) from error
         except requests.RequestException as error:
-            if attempt == 0:
-                sleep(0.75)
+            if attempt < 2:
+                sleep(1.0 + attempt)
                 continue
             logger.warning("Gemini network request failed: %s", error)
             raise TemporaryAssistantError(
@@ -939,8 +939,8 @@ Current user question:
             ) from error
 
         if response.status_code in TRANSIENT_HTTP_STATUSES:
-            if attempt == 0:
-                sleep(0.75)
+            if attempt < 2:
+                sleep(1.0 + attempt)
                 continue
             logger.warning(
                 "Gemini temporary HTTP error %s: %s",
@@ -1049,6 +1049,37 @@ def debug_feeds():
                 }
             )
     return jsonify(report), 200
+
+
+@app.get("/api/assistant/debug-gemini")
+def debug_gemini():
+    """Makes one tiny Gemini call and shows the raw result (no key is shown)."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    info = {"model": GEMINI_MODEL, "key_set": bool(api_key)}
+    if not api_key:
+        return jsonify(info), 200
+    endpoint = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent"
+    )
+    try:
+        response = requests.post(
+            endpoint,
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [
+                    {"role": "user", "parts": [{"text": "Reply with: OK"}]}
+                ],
+                "generationConfig": {"maxOutputTokens": 32},
+            },
+            timeout=30,
+        )
+        info["status"] = response.status_code
+        info["body"] = response.text[:500]
+    except Exception as error:
+        info["error"] = f"{type(error).__name__}: {str(error)[:200]}"
+    return jsonify(info), 200
 
 
 @app.post("/")
