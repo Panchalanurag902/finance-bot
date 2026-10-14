@@ -53,8 +53,21 @@ ALLROUNDUPDATE_FINANCE_URL = os.environ.get(
 )
 GEMINI_MODEL = os.environ.get(
     "GEMINI_MODEL",
-    "gemini-3.6-flash",
+    "gemini-3.8-flash",
 )
+
+# Backup models. If the main model is busy (503/429) or not found (404),
+# the bot automatically tries these one by one.
+# Change them from Render Environment: GEMINI_FALLBACK_MODELS
+# (comma separated, e.g. gemini-3.6-flash,gemini-3.1-flash-lite)
+GEMINI_FALLBACK_MODELS = [
+    name.strip()
+    for name in os.environ.get(
+        "GEMINI_FALLBACK_MODELS",
+        "gemini-3.6-flash,gemini-3.1-flash-lite",
+    ).split(",")
+    if name.strip()
+]
 
 CACHE_SECONDS = 5 * 60
 
@@ -849,14 +862,8 @@ def detect_language(text):
 # ============================================================
 # GEMINI API
 # ============================================================
-def generate_gemini_answer(query, history, resources, language):
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY is not configured in environment variables."
-        )
-
-    prompt = f"""
+def build_prompt(query, history, resources, language):
+    return f"""
 You are ServiceMoney Master AI, a careful multilingual assistant
 created by Anurag Panchal.
 
@@ -898,9 +905,23 @@ Current user question:
 {query}
 """.strip()
 
+
+def generate_gemini_answer_with_model(
+    query, history, resources, language, model_name
+):
+    """Asks one specific Gemini model. Raises TemporaryAssistantError
+    when that model is busy, so the caller can try the next model."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not configured in environment variables."
+        )
+
+    prompt = build_prompt(query, history, resources, language)
+
     endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent"
+        f"{model_name}:generateContent"
     )
 
     request_body = {
@@ -915,7 +936,7 @@ Current user question:
         },
     }
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             response = requests.post(
                 endpoint,
@@ -925,26 +946,31 @@ Current user question:
                 timeout=45,
             )
         except requests.Timeout as error:
-            logger.warning("Gemini request timed out: %s", error)
+            logger.warning(
+                "Gemini request timed out (%s): %s", model_name, error
+            )
             raise TemporaryAssistantError(
                 TEMPORARY_ASSISTANT_MESSAGE
             ) from error
         except requests.RequestException as error:
-            if attempt < 2:
-                sleep(1.0 + attempt)
+            if attempt < 1:
+                sleep(1.0)
                 continue
-            logger.warning("Gemini network request failed: %s", error)
+            logger.warning(
+                "Gemini network request failed (%s): %s", model_name, error
+            )
             raise TemporaryAssistantError(
                 TEMPORARY_ASSISTANT_MESSAGE
             ) from error
 
         if response.status_code in TRANSIENT_HTTP_STATUSES:
-            if attempt < 2:
-                sleep(1.0 + attempt)
+            if attempt < 1:
+                sleep(1.0)
                 continue
             logger.warning(
-                "Gemini temporary HTTP error %s: %s",
+                "Gemini temporary HTTP error %s (%s): %s",
                 response.status_code,
+                model_name,
                 response.text[:300],
             )
             raise TemporaryAssistantError(TEMPORARY_ASSISTANT_MESSAGE)
@@ -983,6 +1009,38 @@ Current user question:
 
         return answer
 
+    raise TemporaryAssistantError(TEMPORARY_ASSISTANT_MESSAGE)
+
+
+def generate_gemini_answer(query, history, resources, language):
+    """Tries the main model first, then each backup model in order."""
+    models = list(dict.fromkeys([GEMINI_MODEL] + GEMINI_FALLBACK_MODELS))
+    last_error = None
+
+    for model_name in models:
+        try:
+            answer = generate_gemini_answer_with_model(
+                query, history, resources, language, model_name
+            )
+            if model_name != GEMINI_MODEL:
+                logger.info("Answered using backup model %s", model_name)
+            return answer
+        except TemporaryAssistantError as error:
+            logger.warning(
+                "Model %s is busy or unreachable, trying next.", model_name
+            )
+            last_error = error
+        except RuntimeError as error:
+            if "HTTP 404" in str(error):
+                logger.warning(
+                    "Model %s not found, trying next.", model_name
+                )
+                last_error = error
+                continue
+            raise
+
+    if last_error:
+        raise last_error
     raise TemporaryAssistantError(TEMPORARY_ASSISTANT_MESSAGE)
 
 # ============================================================
@@ -1053,32 +1111,41 @@ def debug_feeds():
 
 @app.get("/api/assistant/debug-gemini")
 def debug_gemini():
-    """Makes one tiny Gemini call and shows the raw result (no key is shown)."""
+    """Makes one tiny call to every configured model and shows the result
+    (no key is shown)."""
     api_key = os.environ.get("GEMINI_API_KEY")
-    info = {"model": GEMINI_MODEL, "key_set": bool(api_key)}
+    models = list(dict.fromkeys([GEMINI_MODEL] + GEMINI_FALLBACK_MODELS))
+    info = {"key_set": bool(api_key), "models": []}
     if not api_key:
         return jsonify(info), 200
-    endpoint = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent"
-    )
-    try:
-        response = requests.post(
-            endpoint,
-            params={"key": api_key},
-            headers={"Content-Type": "application/json"},
-            json={
-                "contents": [
-                    {"role": "user", "parts": [{"text": "Reply with: OK"}]}
-                ],
-                "generationConfig": {"maxOutputTokens": 32},
-            },
-            timeout=30,
+
+    for model_name in models:
+        entry = {"model": model_name}
+        endpoint = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model_name}:generateContent"
         )
-        info["status"] = response.status_code
-        info["body"] = response.text[:500]
-    except Exception as error:
-        info["error"] = f"{type(error).__name__}: {str(error)[:200]}"
+        try:
+            response = requests.post(
+                endpoint,
+                params={"key": api_key},
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": "Reply with: OK"}],
+                        }
+                    ],
+                    "generationConfig": {"maxOutputTokens": 32},
+                },
+                timeout=30,
+            )
+            entry["status"] = response.status_code
+            entry["body"] = response.text[:300]
+        except Exception as error:
+            entry["error"] = f"{type(error).__name__}: {str(error)[:200]}"
+        info["models"].append(entry)
     return jsonify(info), 200
 
 
